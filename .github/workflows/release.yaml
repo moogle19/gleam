@@ -42,16 +42,16 @@ jobs:
           default: true
           profile: minimal
 
-      # - name: Handle Rust dependencies caching
-        # uses: Swatinem/rust-cache@v1
-        # with:
-          # key: v1-${{ matrix.target }}
+      - name: Handle Rust dependencies caching
+        uses: Swatinem/rust-cache@v1
+        with:
+          key: v1-${{ matrix.target }}
 
       - name: Build release binary
         uses: actions-rs/cargo@v1
         with:
           command: build
-          args: --release
+          args: --release --target ${{ matrix.target }}
 
       - name: Build archive
         shell: bash
