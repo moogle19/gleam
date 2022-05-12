@@ -9,10 +9,12 @@ use crate::{
     ast::{self, SrcSpan, Statement, TypedModule},
     build::{Origin, Target},
     parse::extra::{Comment, ModuleExtra},
-    type_, Error, Result, Warning,
+    type_,
+    uid::UniqueIdGenerator,
+    Error, Result, Warning,
 };
 use source_tree::SourceTree;
-use std::{collections::HashMap, iter::Peekable, path::PathBuf};
+use std::{iter::Peekable, path::PathBuf};
 
 pub use manifest::{Base16Checksum, Manifest, ManifestPackage, ManifestPackageSource};
 
@@ -137,16 +139,16 @@ pub struct Input {
 pub fn analysed(inputs: Vec<Input>) -> Result<Vec<Analysed>> {
     let module_count = inputs.len();
     let mut source_tree = SourceTree::new(inputs)?;
-    let mut modules_type_infos = HashMap::new();
+    let mut modules_type_infos = im::HashMap::new();
     let mut compiled_modules = Vec::with_capacity(module_count);
-    let mut uid = 0;
+    let ids = UniqueIdGenerator::new();
 
     // Insert the prelude
     // DUPE: preludeinsertion
     // TODO: Currently we do this here and also in the tests. It would be better
     // to have one place where we create all this required state for use in each
     // place.
-    let _ = modules_type_infos.insert("gleam".to_string(), type_::build_prelude(&mut uid));
+    let _ = modules_type_infos.insert("gleam".to_string(), type_::build_prelude(&ids));
 
     struct Out {
         source_base_path: PathBuf,
@@ -177,7 +179,7 @@ pub fn analysed(inputs: Vec<Input>) -> Result<Vec<Analysed>> {
         let mut warnings = vec![];
         let result = type_::infer_module(
             Target::Erlang,
-            &mut uid,
+            &ids,
             module,
             origin.to_origin(),
             "old-build-system-doesnt-support-packages",

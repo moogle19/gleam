@@ -3,12 +3,13 @@ use type_::{AccessorsMap, FieldMap, RecordAccessor};
 use super::*;
 use crate::{
     ast::{
-        BitStringSegment, BitStringSegmentOption, CallArg, Constant, TypedConstant,
+        BitStringSegment, BitStringSegmentOption, CallArg, Constant, SrcSpan, TypedConstant,
         TypedConstantBitStringSegmentOption,
     },
     build::Origin,
     io::test::InMemoryFile,
     type_::{self, Module, Type, TypeConstructor, ValueConstructor, ValueConstructorVariant},
+    uid::UniqueIdGenerator,
 };
 use std::{collections::HashMap, io::BufReader, sync::Arc};
 
@@ -18,7 +19,8 @@ fn roundtrip(input: &Module) -> Module {
     let buffer = InMemoryFile::new();
     ModuleEncoder::new(input).write(buffer.clone()).unwrap();
     let buffer = buffer.into_contents().unwrap();
-    ModuleDecoder::new()
+    let ids = UniqueIdGenerator::new();
+    ModuleDecoder::new(ids)
         .read(BufReader::new(buffer.as_slice()))
         .unwrap()
 }
@@ -29,14 +31,18 @@ fn constant_module(constant: TypedConstant) -> Module {
         origin: Origin::Src,
         name: vec!["a".to_string()],
         types: HashMap::new(),
+        types_constructors: HashMap::new(),
         accessors: HashMap::new(),
         values: [(
             "one".to_string(),
             ValueConstructor {
                 public: true,
-                origin: Default::default(),
                 type_: type_::int(),
-                variant: ValueConstructorVariant::ModuleConstant { literal: constant },
+                variant: ValueConstructorVariant::ModuleConstant {
+                    literal: constant,
+                    location: SrcSpan::default(),
+                    module: "one/two".into(),
+                },
             },
         )]
         .into(),
@@ -65,6 +71,7 @@ fn empty_module() {
         origin: Origin::Src,
         name: vec!["one".to_string(), "two".to_string()],
         types: HashMap::new(),
+        types_constructors: HashMap::new(),
         values: HashMap::new(),
         accessors: HashMap::new(),
     };
@@ -88,6 +95,7 @@ fn module_with_app_type() {
             },
         )]
         .into(),
+        types_constructors: HashMap::new(),
         values: HashMap::new(),
         accessors: HashMap::new(),
     };
@@ -111,6 +119,7 @@ fn module_with_fn_type() {
             },
         )]
         .into(),
+        types_constructors: HashMap::new(),
         values: HashMap::new(),
         accessors: HashMap::new(),
     };
@@ -134,6 +143,7 @@ fn module_with_tuple_type() {
             },
         )]
         .into(),
+        types_constructors: HashMap::new(),
         values: HashMap::new(),
         accessors: HashMap::new(),
     };
@@ -163,6 +173,7 @@ fn module_with_generic_type() {
                 },
             )]
             .into(),
+            types_constructors: HashMap::new(),
             values: HashMap::new(),
             accessors: HashMap::new(),
         }
@@ -192,6 +203,7 @@ fn module_with_type_links() {
                 },
             )]
             .into(),
+            types_constructors: HashMap::new(),
             values: HashMap::new(),
             accessors: HashMap::new(),
         }
@@ -201,24 +213,76 @@ fn module_with_type_links() {
 }
 
 #[test]
+fn module_type_to_constructors_mapping() {
+    let module = Module {
+        package: "some_package".to_string(),
+        origin: Origin::Src,
+        name: vec!["a".to_string()],
+        types: HashMap::new(),
+        types_constructors: [("SomeType".to_string(), vec!["One".to_string()])].into(),
+        accessors: HashMap::new(),
+        values: HashMap::new(),
+    };
+
+    assert_eq!(roundtrip(&module), module);
+}
+
+#[test]
 fn module_fn_value() {
     let module = Module {
         package: "some_package".to_string(),
         origin: Origin::Src,
         name: vec!["a".to_string()],
         types: HashMap::new(),
+        types_constructors: HashMap::new(),
         accessors: HashMap::new(),
         values: [(
             "one".to_string(),
             ValueConstructor {
                 public: true,
-                origin: Default::default(),
                 type_: type_::int(),
                 variant: ValueConstructorVariant::ModuleFn {
                     name: "one".to_string(),
                     field_map: None,
                     module: vec!["a".to_string()],
                     arity: 5,
+                    location: SrcSpan {
+                        start: 535,
+                        end: 1100,
+                    },
+                },
+            },
+        )]
+        .into(),
+    };
+
+    assert_eq!(roundtrip(&module), module);
+}
+
+// https://github.com/gleam-lang/gleam/commit/c8f3bd0ddbf61c27ea35f37297058ecca7515f6c
+#[test]
+fn module_fn_value_regression() {
+    let module = Module {
+        package: "some_package".to_string(),
+        origin: Origin::Src,
+        name: vec!["a".into(), "b".into(), "c".into()],
+        types: HashMap::new(),
+        types_constructors: HashMap::new(),
+        accessors: HashMap::new(),
+        values: [(
+            "one".to_string(),
+            ValueConstructor {
+                public: true,
+                type_: type_::int(),
+                variant: ValueConstructorVariant::ModuleFn {
+                    name: "one".to_string(),
+                    field_map: None,
+                    module: vec!["a".to_string()],
+                    arity: 5,
+                    location: SrcSpan {
+                        start: 52,
+                        end: 1100,
+                    },
                 },
             },
         )]
@@ -235,12 +299,12 @@ fn module_fn_value_with_field_map() {
         origin: Origin::Src,
         name: vec!["a".to_string()],
         types: HashMap::new(),
+        types_constructors: HashMap::new(),
         accessors: HashMap::new(),
         values: [(
             "one".to_string(),
             ValueConstructor {
                 public: true,
-                origin: Default::default(),
                 type_: type_::int(),
                 variant: ValueConstructorVariant::ModuleFn {
                     name: "one".to_string(),
@@ -250,6 +314,7 @@ fn module_fn_value_with_field_map() {
                     }),
                     module: vec!["a".to_string()],
                     arity: 5,
+                    location: SrcSpan { start: 2, end: 11 },
                 },
             },
         )]
@@ -266,17 +331,22 @@ fn record_value() {
         origin: Origin::Src,
         name: vec!["a".to_string()],
         types: HashMap::new(),
+        types_constructors: HashMap::new(),
         accessors: HashMap::new(),
         values: [(
             "one".to_string(),
             ValueConstructor {
                 public: true,
-                origin: Default::default(),
                 type_: type_::int(),
                 variant: ValueConstructorVariant::Record {
                     name: "one".to_string(),
+                    module: "themodule".to_string(),
                     field_map: None,
                     arity: 5,
+                    location: SrcSpan {
+                        start: 144,
+                        end: 155,
+                    },
                 },
             },
         )]
@@ -293,20 +363,22 @@ fn record_value_with_field_map() {
         origin: Origin::Src,
         name: vec!["a".to_string()],
         types: HashMap::new(),
+        types_constructors: HashMap::new(),
         accessors: HashMap::new(),
         values: [(
             "one".to_string(),
             ValueConstructor {
                 public: true,
-                origin: Default::default(),
                 type_: type_::int(),
                 variant: ValueConstructorVariant::Record {
+                    module: "themodule".to_string(),
                     name: "one".to_string(),
                     field_map: Some(FieldMap {
                         arity: 20,
                         fields: [("ok".to_string(), 5), ("ko".to_string(), 7)].into(),
                     }),
                     arity: 5,
+                    location: SrcSpan { start: 5, end: 11 },
                 },
             },
         )]
@@ -323,6 +395,7 @@ fn accessors() {
         origin: Origin::Src,
         name: vec!["a".to_string()],
         types: HashMap::new(),
+        types_constructors: HashMap::new(),
         values: HashMap::new(),
         accessors: [
             (

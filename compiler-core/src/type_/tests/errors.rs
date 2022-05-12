@@ -4,16 +4,16 @@ macro_rules! assert_module_error {
     ($src:expr, $error:expr $(,)?) => {
         let (mut ast, _) = crate::parse::parse_module($src).expect("syntax error");
         ast.name = vec!["my_module".to_string()];
-        let mut modules = HashMap::new();
-        let mut uid = 0;
+        let mut modules = im::HashMap::new();
+        let ids = UniqueIdGenerator::new();
         // DUPE: preludeinsertion
         // TODO: Currently we do this here and also in the tests. It would be better
         // to have one place where we create all this required state for use in each
         // place.
-        let _ = modules.insert("gleam".to_string(), build_prelude(&mut uid));
+        let _ = modules.insert("gleam".to_string(), build_prelude(&ids));
         let ast = infer_module(
             Target::Erlang,
-            &mut uid,
+            &ids,
             ast,
             Origin::Src,
             "thepackage",
@@ -25,18 +25,17 @@ macro_rules! assert_module_error {
     };
 
     ($src:expr) => {
-        use std::path::PathBuf;
         let (ast, _) = crate::parse::parse_module($src).expect("syntax error");
-        let mut modules = HashMap::new();
-        let mut uid = 0;
+        let mut modules = im::HashMap::new();
+        let ids = UniqueIdGenerator::new();
         // DUPE: preludeinsertion
         // TODO: Currently we do this here and also in the tests. It would be better
         // to have one place where we create all this required state for use in each
         // place.
-        let _ = modules.insert("gleam".to_string(), build_prelude(&mut uid));
+        let _ = modules.insert("gleam".to_string(), build_prelude(&ids));
         let error = infer_module(
             Target::Erlang,
-            &mut uid,
+            &ids,
             ast,
             Origin::Src,
             "thepackage",
@@ -57,16 +56,16 @@ macro_rules! assert_module_error {
 macro_rules! assert_error {
     ($src:expr, $error:expr $(,)?) => {
         let ast = crate::parse::parse_expression_sequence($src).expect("syntax error");
-        let mut uid = 0;
-        let mut modules = HashMap::new();
+        let ids = UniqueIdGenerator::new();
+        let mut modules = im::HashMap::new();
         // DUPE: preludeinsertion
         // TODO: Currently we do this here and also in the tests. It would be better
         // to have one place where we create all this required state for use in each
         // place.
-        let _ = modules.insert("gleam".to_string(), build_prelude(&mut uid));
+        let _ = modules.insert("gleam".to_string(), build_prelude(&ids));
         println!("new assert_error test: {}", modules.len());
         let result = ExprTyper::new(&mut Environment::new(
-            &mut uid,
+            ids,
             &["somemod".to_string()],
             &modules,
             &mut vec![],
@@ -79,16 +78,16 @@ macro_rules! assert_error {
     ($src:expr) => {
         use std::path::PathBuf;
         let ast = crate::parse::parse_expression_sequence($src).expect("syntax error");
-        let mut uid = 0;
-        let mut modules = HashMap::new();
+        let ids = UniqueIdGenerator::new();
+        let mut modules = im::HashMap::new();
         // DUPE: preludeinsertion
         // TODO: Currently we do this here and also in the tests. It would be better
         // to have one place where we create all this required state for use in each
         // place.
-        let _ = modules.insert("gleam".to_string(), build_prelude(&mut uid));
+        let _ = modules.insert("gleam".to_string(), build_prelude(&ids));
         println!("new assert_error test: {}", modules.len());
         let error = ExprTyper::new(&mut Environment::new(
-            &mut uid,
+            ids,
             &["somemod".to_string()],
             &modules,
             &mut vec![],
@@ -335,6 +334,11 @@ fn unknown_variable() {
 }
 
 #[test]
+fn unknown_module() {
+    assert_module_error!("import xpto");
+}
+
+#[test]
 fn unknown_variable_2() {
     assert_error!("case 1 { x -> 1 1 -> x }");
 }
@@ -392,6 +396,69 @@ fn function_return_annotation() {
 #[test]
 fn function_arg_and_return_annotation() {
     assert_error!("fn(x: Int) -> Float { x }");
+}
+
+#[test]
+fn function_return_annotation_mismatch_with_try() {
+    assert_error!(
+        "fn() -> Result(Nil, Nil) {
+            let a = 1
+            try _ = Error(1)
+            // comments
+            // comments
+            // comments
+            // comments
+            // comments
+            // comments
+            // comments
+            // comments
+            // comments
+            // comments
+            Ok(Nil)
+        }"
+    );
+}
+
+#[test]
+fn function_return_annotation_mismatch_with_try_nested() {
+    assert_error!(
+        "fn() -> Result(Nil, Nil) {
+          try _ = {
+            try _ = {
+                try _ = Error(1)
+                Ok(Nil)
+            }
+            Ok(Nil)
+          }
+          Ok(Nil)
+        }"
+    );
+}
+
+// https://github.com/gleam-lang/gleam/issues/1378
+#[test]
+fn function_return_annotation_mismatch_with_pipe() {
+    assert_module_error!(
+        "pub fn main() -> String {
+            1
+            |> add_two
+         }
+          
+         fn add_two(i: Int) -> Int {
+            i + 2
+         }"
+    );
+}
+
+#[test]
+fn variable_annotation_with_try() {
+    assert_error!(
+        "let x: Result(Nil, Nil) = {
+            let a_var = 1
+            try _ = Error(1)
+            Ok(Nil)
+        }"
+    );
 }
 
 #[test]
@@ -675,6 +742,68 @@ fn inconsistent_try_4() {
 #[test]
 fn inconsistent_try_5() {
     assert_error!(r#"try x = Error(1) Error("Not this one") Error("This one")"#);
+}
+
+#[test]
+fn field_not_in_all_variants() {
+    assert_module_error!(
+        "
+pub type Person {
+    Teacher(name: String, age: Int, title: String)
+    Student(name: String, age: Int)
+}
+pub fn get_title(person: Person) { person.title }"
+    );
+}
+
+#[test]
+fn field_not_in_any_variant() {
+    assert_module_error!(
+        "
+pub type Person {
+    Teacher(name: String, age: Int, title: String)
+    Student(name: String, age: Int)
+}
+pub fn get_height(person: Person) { person.height }"
+    );
+}
+
+#[test]
+fn field_type_different_between_variants() {
+    assert_module_error!(
+        "
+pub type Shape {
+    Square(x: Int, y: Int)
+    Rectangle(x: String, y: String)
+}
+pub fn get_x(shape: Shape) { shape.x }
+pub fn get_y(shape: Shape) { shape.y }"
+    );
+}
+
+#[test]
+fn accessor_multiple_variants_multiple_positions() {
+    // We cannot access fields on custom types with multiple variants where they are in different positions e.g. 2nd and 3rd
+    assert_module_error!(
+        "
+pub type Person {
+    Teacher(name: String, title: String, age: Int)
+    Student(name: String, age: Int)
+}
+pub fn get_name(person: Person) { person.name }
+pub fn get_age(person: Person) { person.age }"
+    );
+
+    // We cannot access fields on custom types with multiple variants where they are in different positions e.g. 1st and 3rd
+    assert_module_error!(
+        "
+pub type Person {
+    Teacher(title: String, age: Int, name: String)
+    Student(name: String, age: Int)
+}
+pub fn get_name(person: Person) { person.name }
+pub fn get_age(person: Person) { person.age }"
+    );
 }
 
 #[test]
@@ -1116,6 +1245,40 @@ fn x() {
 }
 
 #[test]
+fn wrong_type_var() {
+    // A unification error should show the type var as named by user
+    // See https://github.com/gleam-lang/gleam/issues/1256
+    assert_module_error!(
+        r#"fn foo(x: String) { x }
+fn multi_result(x: some_name) {
+  foo(x)
+}"#
+    );
+}
+
+#[test]
+fn wrong_type_arg() {
+    assert_module_error!(
+        r#"
+fn foo(x: List(Int)) { x }
+fn main(y: List(something)) {
+  foo(y)
+}"#
+    );
+}
+
+#[test]
+fn wrong_type_ret() {
+    // See https://github.com/gleam-lang/gleam/pull/1407#issuecomment-1001162876
+    assert_module_error!(
+        r#"pub fn main(x: something) -> Int {
+  let y = x
+  y
+}"#
+    );
+}
+
+#[test]
 fn wrong_type_update() {
     // A variable of the wrong type given to a record update
     assert_module_error!(
@@ -1308,4 +1471,178 @@ pub fn parse(input: BitString) -> String {
   }
 }"#
     );
+}
+
+#[test]
+fn let_exhaustiveness1() {
+    assert_module_error!(
+        r#"
+pub fn main(b) {
+    let True = b
+    Nil
+}
+"#
+    );
+}
+
+#[test]
+fn let_exhaustiveness2() {
+    assert_module_error!(
+        r#"
+pub fn main(r) {
+    let Error(_) = r
+    Nil
+}
+"#
+    );
+}
+
+#[test]
+fn let_exhaustiveness3() {
+    assert_module_error!(
+        r#"
+pub type Media {
+    Audio(BitString)
+    Video(BitString)
+    Text(String)
+}
+pub fn main(m) {
+    let Video(_) = m
+    Nil
+}
+"#
+    );
+}
+
+#[test]
+fn let_exhaustiveness4() {
+    assert_module_error!(
+        r#"
+pub type Media {
+    Audio(BitString)
+    Video(BitString)
+    Text(String)
+}
+pub fn main(m) {
+    let Video(_) as v = m
+    v
+}
+"#
+    );
+}
+
+#[test]
+fn case_exhaustiveness1() {
+    assert_module_error!(
+        r#"
+pub fn main(b) {
+    case b {
+        True -> Nil
+    }
+}
+"#
+    );
+}
+
+#[test]
+fn case_exhaustiveness2() {
+    assert_module_error!(
+        r#"
+pub fn main(r) {
+    case r {
+        Error(_) -> Nil
+    }
+}
+"#
+    );
+}
+
+#[test]
+fn case_exhaustiveness3() {
+    assert_module_error!(
+        r#"
+pub type Media {
+    Audio(BitString)
+    Video(BitString)
+    Text(String)
+}
+pub fn main(m) {
+    case m {
+        Audio(_) as a -> a
+        Video(_) -> m
+    }
+}
+"#
+    );
+}
+
+#[test]
+fn case_exhaustiveness4() {
+    assert_module_error!(
+        r#"
+pub type Media {
+    Audio(BitString)
+    Video(BitString)
+    Text(String)
+}
+pub fn main(m) {
+    case m {
+        Video(_) -> m
+    }
+}
+"#
+    );
+}
+
+#[test]
+fn case_exhaustiveness5() {
+    assert_module_error!(
+        r#"
+pub type Media {
+    Audio(BitString)
+    Video(BitString)
+    Text(String)
+}
+pub fn main(m) {
+    case m {
+        Audio(_) | Text(_) -> m
+    }
+}
+"#
+    );
+}
+
+#[test]
+fn case_exhaustiveness6() {
+    assert_module_error!(
+        r#"
+pub fn main(b) {
+    case b {
+        b if b == True -> Nil
+        b if b != True -> Nil
+    }
+}
+"#
+    );
+}
+
+#[test]
+fn pipe_arity_error() {
+    assert_module_error!(
+        r#"
+fn go(x, y) {
+  x + y
+}
+
+fn main(x) {
+  1
+  |> go
+}
+"#
+    );
+}
+
+#[test]
+fn negate_string() {
+    assert_error!(r#"!"Hello Gleam""#);
 }

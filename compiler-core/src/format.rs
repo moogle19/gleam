@@ -11,14 +11,14 @@ use crate::{
     Error, Result,
 };
 use itertools::Itertools;
-use std::{path::PathBuf, sync::Arc};
+use std::{path::Path, sync::Arc};
 use vec1::Vec1;
 
 const INDENT: isize = 2;
 
-pub fn pretty(writer: &mut impl Utf8Writer, src: &str) -> Result<()> {
+pub fn pretty(writer: &mut impl Utf8Writer, src: &str, path: &Path) -> Result<()> {
     let (module, extra) = crate::parse::parse_module(src).map_err(|error| Error::Parse {
-        path: PathBuf::from("<standard input>"),
+        path: path.to_path_buf(),
         src: src.to_string(),
         error,
     })?;
@@ -53,6 +53,7 @@ struct Intermediate<'a> {
     empty_lines: &'a [usize],
 }
 
+/// Hayleigh's bane
 #[derive(Debug, Clone, Default)]
 pub struct Formatter<'a> {
     comments: &'a [Comment<'a>],
@@ -196,9 +197,9 @@ impl<'comments> Formatter<'comments> {
                 body,
                 public,
                 return_annotation,
-                end_location,
+                end_position,
                 ..
-            } => self.statement_fn(public, name, args, return_annotation, body, *end_location),
+            } => self.statement_fn(public, name, args, return_annotation, body, *end_position),
 
             Statement::TypeAlias {
                 alias,
@@ -640,6 +641,8 @@ impl<'comments> Formatter<'comments> {
 
             UntypedExpr::TupleIndex { tuple, index, .. } => self.tuple_index(tuple, *index),
 
+            UntypedExpr::Negate { value, .. } => self.negate(value),
+
             UntypedExpr::Fn {
                 is_capture: true,
                 body,
@@ -756,22 +759,8 @@ impl<'comments> Formatter<'comments> {
     }
 
     fn call<'a>(&mut self, fun: &'a UntypedExpr, args: &'a [CallArg<UntypedExpr>]) -> Document<'a> {
-        fn is_breakable(expr: &UntypedExpr) -> bool {
-            matches!(
-                expr,
-                UntypedExpr::Fn { .. }
-                    | UntypedExpr::Sequence { .. }
-                    | UntypedExpr::Assignment { .. }
-                    | UntypedExpr::Call { .. }
-                    | UntypedExpr::Case { .. }
-                    | UntypedExpr::List { .. }
-                    | UntypedExpr::Tuple { .. }
-                    | UntypedExpr::BitString { .. }
-            )
-        }
-
         match args {
-            [arg] if is_breakable(&arg.value) => self
+            [arg] if is_breakable_expr(&arg.value) => self
                 .expr(fun)
                 .append("(")
                 .append(self.call_arg(arg))
@@ -819,7 +808,7 @@ impl<'comments> Formatter<'comments> {
     ) -> Document<'a> {
         use std::iter::once;
         let constructor_doc = self.expr(constructor);
-        let spread_doc = "..".to_doc().append(spread.name.to_doc());
+        let spread_doc = "..".to_doc().append(self.expr(&spread.base));
         let arg_docs = args.iter().map(|a| self.record_update_arg(a));
         let all_arg_docs = once(spread_doc).chain(arg_docs);
         constructor_doc.append(wrap_args(all_arg_docs)).group()
@@ -918,9 +907,19 @@ impl<'comments> Formatter<'comments> {
                 fun,
                 arguments: args,
                 ..
-            } => self
-                .expr(fun)
-                .append(wrap_args(args.iter().map(|a| self.call_arg(a))).group()),
+            } => match args.as_slice() {
+                [first, second] if is_breakable_expr(&second.value) && first.is_capture_hole() => {
+                    self.expr(fun)
+                        .append("(_, ")
+                        .append(self.call_arg(second))
+                        .append(")")
+                        .group()
+                }
+
+                _ => self
+                    .expr(fun)
+                    .append(wrap_args(args.iter().map(|a| self.call_arg(a))).group()),
+            },
 
             // The body of a capture being not a fn shouldn't be possible...
             _ => panic!("Function capture body found not to be a call in the formatter",),
@@ -1223,7 +1222,13 @@ impl<'comments> Formatter<'comments> {
                     elements.iter().map(|e| self.pattern(e)),
                     break_(",", ", "),
                 ));
-                let tail = tail.as_ref().map(|e| self.pattern(e));
+                let tail = tail.as_ref().map(|e| {
+                    if e.is_discard() {
+                        nil()
+                    } else {
+                        self.pattern(e)
+                    }
+                });
                 list(elements, tail)
             }
 
@@ -1335,6 +1340,10 @@ impl<'comments> Formatter<'comments> {
             None => self.const_expr(&arg.value),
             Some(s) => s.to_doc().append(": ").append(self.const_expr(&arg.value)),
         }
+    }
+
+    fn negate<'a>(&mut self, value: &'a UntypedExpr) -> Document<'a> {
+        docvec!["!", self.wrap_expr(value)]
     }
 }
 
@@ -1583,5 +1592,19 @@ pub fn comments_before<'a>(
     (
         popped,
         comments.get(end..).expect("Comments before slicing"),
+    )
+}
+
+fn is_breakable_expr(expr: &UntypedExpr) -> bool {
+    matches!(
+        expr,
+        UntypedExpr::Fn { .. }
+            | UntypedExpr::Sequence { .. }
+            | UntypedExpr::Assignment { .. }
+            | UntypedExpr::Call { .. }
+            | UntypedExpr::Case { .. }
+            | UntypedExpr::List { .. }
+            | UntypedExpr::Tuple { .. }
+            | UntypedExpr::BitString { .. }
     )
 }

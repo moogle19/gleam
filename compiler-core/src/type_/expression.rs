@@ -13,8 +13,8 @@ use crate::ast::{
 use im::hashmap;
 
 #[derive(Debug)]
-pub(crate) struct ExprTyper<'a, 'b, 'c> {
-    pub(crate) environment: &'a mut Environment<'b, 'c>,
+pub(crate) struct ExprTyper<'a, 'b> {
+    pub(crate) environment: &'a mut Environment<'b>,
 
     // Type hydrator for creating types from annotations
     pub(crate) hydrator: Hydrator,
@@ -25,8 +25,8 @@ pub(crate) struct ExprTyper<'a, 'b, 'c> {
     pub(crate) ungeneralised_function_used: bool,
 }
 
-impl<'a, 'b, 'c> ExprTyper<'a, 'b, 'c> {
-    pub fn new(environment: &'a mut Environment<'b, 'c>) -> Self {
+impl<'a, 'b> ExprTyper<'a, 'b> {
+    pub fn new(environment: &'a mut Environment<'b>) -> Self {
         let mut hydrator = Hydrator::new();
         hydrator.permit_holes(true);
         Self {
@@ -54,7 +54,7 @@ impl<'a, 'b, 'c> ExprTyper<'a, 'b, 'c> {
         self.hydrator.type_from_ast(ast, self.environment)
     }
 
-    fn instantiate(&mut self, t: Arc<Type>, ids: &mut im::HashMap<usize, Arc<Type>>) -> Arc<Type> {
+    fn instantiate(&mut self, t: Arc<Type>, ids: &mut im::HashMap<u64, Arc<Type>>) -> Arc<Type> {
         self.environment.instantiate(t, ids, &self.hydrator)
     }
 
@@ -107,7 +107,7 @@ impl<'a, 'b, 'c> ExprTyper<'a, 'b, 'c> {
                 body,
                 return_annotation,
                 ..
-            } => self.infer_fn(args, *body, is_capture, return_annotation, location),
+            } => self.infer_fn(args, &[], *body, is_capture, return_annotation, location),
 
             UntypedExpr::Assignment {
                 location,
@@ -180,6 +180,8 @@ impl<'a, 'b, 'c> ExprTyper<'a, 'b, 'c> {
                 spread,
                 arguments: args,
             } => self.infer_record_update(*constructor, spread, args, location),
+
+            UntypedExpr::Negate { location, value } => self.infer_negate(location, value),
         }
     }
 
@@ -266,15 +268,32 @@ impl<'a, 'b, 'c> ExprTyper<'a, 'b, 'c> {
         })
     }
 
+    fn infer_negate(
+        &mut self,
+        location: SrcSpan,
+        value: Box<UntypedExpr>,
+    ) -> Result<TypedExpr, Error> {
+        let value = self.infer(*value)?;
+
+        self.unify(bool(), value.type_())
+            .map_err(|e| convert_unify_error(e, value.location()))?;
+
+        Ok(TypedExpr::Negate {
+            location,
+            value: Box::new(value),
+        })
+    }
+
     fn infer_fn(
         &mut self,
         args: Vec<UntypedArg>,
+        expected_args: &[Arc<Type>],
         body: UntypedExpr,
         is_capture: bool,
         return_annotation: Option<TypeAst>,
         location: SrcSpan,
     ) -> Result<TypedExpr, Error> {
-        let (args, body) = self.do_infer_fn(args, body, &return_annotation)?;
+        let (args, body) = self.do_infer_fn(args, expected_args, body, &return_annotation)?;
         let args_types = args.iter().map(|a| a.type_.clone()).collect();
         let typ = fn_(args_types, body.type_());
         Ok(TypedExpr::Fn {
@@ -287,7 +306,11 @@ impl<'a, 'b, 'c> ExprTyper<'a, 'b, 'c> {
         })
     }
 
-    fn infer_arg(&mut self, arg: UntypedArg) -> Result<TypedArg, Error> {
+    fn infer_arg(
+        &mut self,
+        arg: UntypedArg,
+        expected: Option<Arc<Type>>,
+    ) -> Result<TypedArg, Error> {
         let Arg {
             names,
             annotation,
@@ -298,6 +321,17 @@ impl<'a, 'b, 'c> ExprTyper<'a, 'b, 'c> {
             .clone()
             .map(|t| self.type_from_ast(&t))
             .unwrap_or_else(|| Ok(self.new_unbound_var()))?;
+
+        // If we know the expected type of the argument from its contextual
+        // usage then unify the newly constructed type with the expected type.
+        // We do this here because then there is more type information for the
+        // function being type checked, resulting in better type errors and the
+        // record field access syntax working.
+        if let Some(expected) = expected {
+            self.unify(expected, typ.clone())
+                .map_err(|e| convert_unify_error(e, location))?;
+        }
+
         Ok(Arg {
             names,
             location,
@@ -572,11 +606,15 @@ impl<'a, 'b, 'c> ExprTyper<'a, 'b, 'c> {
         };
 
         let left = self.infer(left)?;
-        self.unify(input_type.clone(), left.type_())
-            .map_err(|e| e.operator_situation(name).into_error(left.location()))?;
+        self.unify(input_type.clone(), left.type_()).map_err(|e| {
+            e.operator_situation(name)
+                .into_error(left.type_defining_location())
+        })?;
         let right = self.infer(right)?;
-        self.unify(input_type, right.type_())
-            .map_err(|e| e.operator_situation(name).into_error(right.location()))?;
+        self.unify(input_type, right.type_()).map_err(|e| {
+            e.operator_situation(name)
+                .into_error(right.type_defining_location())
+        })?;
 
         Ok(TypedExpr::BinOp {
             location,
@@ -607,13 +645,28 @@ impl<'a, 'b, 'c> ExprTyper<'a, 'b, 'c> {
             let ann_typ = self
                 .type_from_ast(ann)
                 .map(|t| self.instantiate(t, &mut hashmap![]))?;
-            self.unify(ann_typ, value_typ)
-                .map_err(|e| convert_unify_error(e, value.location()))?;
+            self.unify(ann_typ, value_typ.clone())
+                .map_err(|e| convert_unify_error(e, value.type_defining_location()))?;
+        }
+
+        // We currently only do only limited exhaustiveness checking of custom types
+        // at the top level of patterns.
+        // Do not perform exhaustiveness checking if user explicitly used `assert`.
+        if kind != AssignmentKind::Assert {
+            if let Err(unmatched) = self
+                .environment
+                .check_exhaustiveness(vec![pattern.clone()], collapse_links(value_typ.clone()))
+            {
+                return Err(Error::NotExhaustivePatternMatch {
+                    location,
+                    unmatched,
+                });
+            }
         }
 
         Ok(TypedExpr::Assignment {
             location,
-            typ: value.type_(),
+            typ: value_typ,
             kind,
             pattern,
             value: Box::new(value),
@@ -638,7 +691,7 @@ impl<'a, 'b, 'c> ExprTyper<'a, 'b, 'c> {
             let v = value_type.clone();
             let e = try_error_type.clone();
             self.unify(result(v, e), value.type_())
-                .map_err(|e| convert_unify_error(e, value.location()))?;
+                .map_err(|e| convert_unify_error(e, value.type_defining_location()))?;
         };
 
         // Ensure the pattern matches the type of the value
@@ -653,7 +706,10 @@ impl<'a, 'b, 'c> ExprTyper<'a, 'b, 'c> {
         {
             let t = self.new_unbound_var();
             self.unify(result(t, try_error_type), typ.clone())
-                .map_err(|e| convert_unify_error(e, then.location()))?;
+                .map_err(|e| {
+                    e.inconsistent_try(typ.is_result())
+                        .into_error(then.type_defining_location())
+                })?;
         }
 
         // Check that any type annotation is accurate.
@@ -662,7 +718,7 @@ impl<'a, 'b, 'c> ExprTyper<'a, 'b, 'c> {
                 .type_from_ast(ann)
                 .map(|t| self.instantiate(t, &mut hashmap![]))?;
             self.unify(ann_typ, value_type)
-                .map_err(|e| convert_unify_error(e, value.location()))?;
+                .map_err(|e| convert_unify_error(e, value.type_defining_location()))?;
         }
 
         Ok(TypedExpr::Try {
@@ -704,6 +760,16 @@ impl<'a, 'b, 'c> ExprTyper<'a, 'b, 'c> {
                 .map_err(|e| e.case_clause_mismatch().into_error(typed_clause.location()))?;
             typed_clauses.push(typed_clause);
         }
+
+        if let Err(unmatched) =
+            self.check_case_exhaustiveness(subjects_count, &subject_types, &typed_clauses)
+        {
+            return Err(Error::NotExhaustivePatternMatch {
+                location,
+                unmatched,
+            });
+        }
+
         Ok(TypedExpr::Case {
             location,
             typ: return_type,
@@ -796,13 +862,13 @@ impl<'a, 'b, 'c> ExprTyper<'a, 'b, 'c> {
 
                 // We cannot support all values in guard expressions as the BEAM does not
                 match &constructor.variant {
-                    ValueConstructorVariant::LocalVariable => (),
+                    ValueConstructorVariant::LocalVariable { .. } => (),
                     ValueConstructorVariant::ModuleFn { .. }
                     | ValueConstructorVariant::Record { .. } => {
-                        return Err(Error::NonLocalClauseGuardVariable { location, name })
+                        return Err(Error::NonLocalClauseGuardVariable { location, name });
                     }
 
-                    ValueConstructorVariant::ModuleConstant { literal } => {
+                    ValueConstructorVariant::ModuleConstant { literal, .. } => {
                         return Ok(ClauseGuard::Constant(literal.clone()))
                     }
                 };
@@ -825,7 +891,7 @@ impl<'a, 'b, 'c> ExprTyper<'a, 'b, 'c> {
                     Type::Tuple { elems } => {
                         let type_ = elems
                             .get(index as usize)
-                            .ok_or_else(|| Error::OutOfBoundsTupleIndex {
+                            .ok_or(Error::OutOfBoundsTupleIndex {
                                 location,
                                 index,
                                 size: elems.len(),
@@ -1117,6 +1183,10 @@ impl<'a, 'b, 'c> ExprTyper<'a, 'b, 'c> {
                         value_constructors: module.values.keys().map(|t| t.to_string()).collect(),
                     })?;
 
+            // Register this imported module as having been used, to inform
+            // warnings of unused imports later
+            let _ = self.environment.unused_modules.remove(module_alias);
+
             (module.name.clone(), constructor.clone())
         };
 
@@ -1125,7 +1195,7 @@ impl<'a, 'b, 'c> ExprTyper<'a, 'b, 'c> {
             label,
             typ: type_.clone(),
             location: select_location,
-            module_name,
+            module_name: module_name.join("/"),
             module_alias: module_alias.to_string(),
             constructor: constructor.variant.to_module_value_constructor(type_),
         })
@@ -1235,7 +1305,7 @@ impl<'a, 'b, 'c> ExprTyper<'a, 'b, 'c> {
             constructor => {
                 return Err(Error::RecordUpdateInvalidConstructor {
                     location: constructor.location(),
-                })
+                });
             }
         };
 
@@ -1255,7 +1325,7 @@ impl<'a, 'b, 'c> ExprTyper<'a, 'b, 'c> {
         } = value_constructor
         {
             if let Type::Fn { retrn, .. } = value_constructor.type_.as_ref() {
-                let spread = self.infer_var(spread.name, spread.location)?;
+                let spread = self.infer(*spread.base)?;
                 let return_type = self.instantiate(retrn.clone(), &mut hashmap![]);
 
                 // Check that the spread variable unifies with the return type of the constructor
@@ -1274,7 +1344,7 @@ impl<'a, 'b, 'c> ExprTyper<'a, 'b, 'c> {
                             let spread_field = self.infer_known_record_access(
                                 spread.clone(),
                                 label.to_string(),
-                               *location,
+                                *location,
                             )?;
 
                             // Check that the update argument unifies with the corresponding
@@ -1289,7 +1359,7 @@ impl<'a, 'b, 'c> ExprTyper<'a, 'b, 'c> {
                                     "Failed to lookup record field after successfully inferring that field",
                                 ),
                                 Some(p) => Ok(TypedRecordUpdateArg {
-                                    location:*location,
+                                    location: *location,
                                     label: label.to_string(),
                                     value,
                                     index: *p,
@@ -1397,7 +1467,6 @@ impl<'a, 'b, 'c> ExprTyper<'a, 'b, 'c> {
         let ValueConstructor {
             public,
             variant,
-            origin,
             type_: typ,
         } = constructor;
 
@@ -1406,7 +1475,6 @@ impl<'a, 'b, 'c> ExprTyper<'a, 'b, 'c> {
         Ok(ValueConstructor {
             public,
             variant,
-            origin,
             type_: typ,
         })
     }
@@ -1459,11 +1527,12 @@ impl<'a, 'b, 'c> ExprTyper<'a, 'b, 'c> {
                     } => (name.clone(), field_map.clone()),
 
                     ValueConstructorVariant::ModuleFn { .. }
-                    | ValueConstructorVariant::LocalVariable => {
+                    | ValueConstructorVariant::LocalVariable { .. } => {
                         return Err(Error::NonLocalClauseGuardVariable { location, name })
                     }
 
-                    ValueConstructorVariant::ModuleConstant { literal } => {
+                    // TODO: remove this clone. Could use an rc instead
+                    ValueConstructorVariant::ModuleConstant { literal, .. } => {
                         return Ok(literal.clone())
                     }
                 };
@@ -1495,11 +1564,12 @@ impl<'a, 'b, 'c> ExprTyper<'a, 'b, 'c> {
                     } => (name.clone(), field_map.clone()),
 
                     ValueConstructorVariant::ModuleFn { .. }
-                    | ValueConstructorVariant::LocalVariable => {
+                    | ValueConstructorVariant::LocalVariable { .. } => {
                         return Err(Error::NonLocalClauseGuardVariable { location, name })
                     }
 
-                    ValueConstructorVariant::ModuleConstant { literal } => {
+                    // TODO: remove this clone. Could be an rc instead
+                    ValueConstructorVariant::ModuleConstant { literal, .. } => {
                         return Ok(literal.clone())
                     }
                 };
@@ -1518,7 +1588,7 @@ impl<'a, 'b, 'c> ExprTyper<'a, 'b, 'c> {
                             .get(module_name)
                             .expect("Failed to find previously located module import")
                             .name
-                            .clone(),
+                            .join("/"),
                         typ: constructor.type_.clone(),
                         module_alias: module_name.clone(),
                         constructor: constructor
@@ -1697,9 +1767,7 @@ impl<'a, 'b, 'c> ExprTyper<'a, 'b, 'c> {
                     value,
                     location,
                 } = arg;
-                let value = self.infer(value)?;
-                self.unify(typ.clone(), value.type_())
-                    .map_err(|e| convert_unify_error(e, value.location()))?;
+                let value = self.infer_call_argument(value, typ.clone())?;
                 Ok(CallArg {
                     label,
                     value,
@@ -1710,9 +1778,56 @@ impl<'a, 'b, 'c> ExprTyper<'a, 'b, 'c> {
         Ok((fun, args, return_type))
     }
 
+    fn infer_call_argument(
+        &mut self,
+        value: UntypedExpr,
+        typ: Arc<Type>,
+    ) -> Result<TypedExpr, Error> {
+        let typ = collapse_links(typ);
+
+        let value = match (&*typ, value) {
+            // If the argument is expected to be a function and we are passed a
+            // function literal with the correct number of arguments then we
+            // have special handling of this argument, passing in information
+            // about what the expected arguments are. This extra information
+            // when type checking the function body means that the
+            // `record.field` access syntax can be used, and improves error
+            // messages.
+            (
+                Type::Fn {
+                    args: expected_arguments,
+                    ..
+                },
+                UntypedExpr::Fn {
+                    arguments,
+                    body,
+                    return_annotation,
+                    location,
+                    is_capture: false,
+                    ..
+                },
+            ) if expected_arguments.len() == arguments.len() => self.infer_fn(
+                arguments,
+                expected_arguments,
+                *body,
+                false,
+                return_annotation,
+                location,
+            ),
+
+            // Otherwise just perform normal type inference.
+            (_, value) => self.infer(value),
+        }?;
+
+        self.unify(typ, value.type_())
+            .map_err(|e| convert_unify_error(e, value.location()))?;
+        Ok(value)
+    }
+
     pub fn do_infer_fn(
         &mut self,
         args: Vec<UntypedArg>,
+        expected_args: &[Arc<Type>],
         body: UntypedExpr,
         return_annotation: &Option<TypeAst>,
     ) -> Result<(Vec<TypedArg>, TypedExpr), Error> {
@@ -1720,7 +1835,8 @@ impl<'a, 'b, 'c> ExprTyper<'a, 'b, 'c> {
         // type variable or a type provided by an annotation.
         let args: Vec<_> = args
             .into_iter()
-            .map(|arg| self.infer_arg(arg))
+            .enumerate()
+            .map(|(i, arg)| self.infer_arg(arg, expected_args.get(i).cloned()))
             .try_collect()?;
 
         let return_type = match return_annotation {
@@ -1737,15 +1853,16 @@ impl<'a, 'b, 'c> ExprTyper<'a, 'b, 'c> {
         body: UntypedExpr,
         return_type: Option<Arc<Type>>,
     ) -> Result<(Vec<TypedArg>, TypedExpr), Error> {
-        let body = self.in_new_scope(|body_typer| {
+        let (body_rigid_names, body_infer) = self.in_new_scope(|body_typer| {
             for (arg, t) in args.iter().zip(args.iter().map(|arg| arg.type_.clone())) {
                 match &arg.names {
                     ArgNames::Named { name } | ArgNames::NamedLabelled { name, .. } => {
                         body_typer.environment.insert_variable(
                             name.to_string(),
-                            ValueConstructorVariant::LocalVariable,
+                            ValueConstructorVariant::LocalVariable {
+                                location: arg.location,
+                            },
                             t,
-                            arg.location,
                         );
                         body_typer.environment.init_usage(
                             name.to_string(),
@@ -1757,15 +1874,61 @@ impl<'a, 'b, 'c> ExprTyper<'a, 'b, 'c> {
                 };
             }
 
-            body_typer.infer(body)
-        })?;
+            (body_typer.hydrator.rigid_names(), body_typer.infer(body))
+        });
 
-        // Check that any return type type is accurate.
+        let body = body_infer.map_err(|e| e.with_unify_error_rigid_names(&body_rigid_names))?;
+
+        // Check that any return type is accurate.
         if let Some(return_type) = return_type {
-            self.unify(return_type, body.type_())
-                .map_err(|e| e.return_annotation_mismatch().into_error(body.location()))?;
+            self.unify(return_type, body.type_()).map_err(|e| {
+                e.return_annotation_mismatch()
+                    .into_error(body.type_defining_location())
+                    .with_unify_error_rigid_names(&body_rigid_names)
+            })?;
         }
 
         Ok((args, body))
+    }
+
+    fn check_case_exhaustiveness(
+        &mut self,
+        subjects_count: usize,
+        subjects: &[Arc<Type>],
+        typed_clauses: &[Clause<TypedExpr, PatternConstructor, Arc<Type>, String>],
+    ) -> Result<(), Vec<String>> {
+        // Because exhaustiveness checking in presence of multiple subjects is similar
+        // to full exhaustiveness checking of tuples or other nested record patterns,
+        // and we currently only do only limited exhaustiveness checking of custom types
+        // at the top level of patterns, only consider case expressions with one subject.
+        if subjects_count != 1 {
+            return Ok(());
+        }
+        let subject_type = subjects
+            .get(0)
+            .expect("Asserted there's one case subject but found none");
+        let value_typ = collapse_links(subject_type.clone());
+
+        // Currently guards in exhaustiveness checking are assumed that they can fail,
+        // so we go through all clauses and pluck out only the patterns
+        // for clauses that don't have guards.
+        let mut patterns = Vec::new();
+        for clause in typed_clauses {
+            if let Clause { guard: None, .. } = clause {
+                // clause.pattern is a list of patterns for all subjects
+                if let Some(pattern) = clause.pattern.get(0) {
+                    patterns.push(pattern.clone());
+                }
+                // A clause can be built with alternative patterns as well, e.g. `Audio(_) | Text(_) ->`.
+                // We're interested in all patterns so we build a flattened list.
+                for alternative_pattern in &clause.alternative_patterns {
+                    // clause.alternative_pattern is a list of patterns for all subjects
+                    if let Some(pattern) = alternative_pattern.get(0) {
+                        patterns.push(pattern.clone());
+                    }
+                }
+            }
+        }
+        self.environment.check_exhaustiveness(patterns, value_typ)
     }
 }

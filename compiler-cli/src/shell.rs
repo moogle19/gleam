@@ -1,5 +1,5 @@
 use gleam_core::{
-    build::{Mode, Target},
+    build::{Mode, Options, Target},
     error::Error,
     paths,
 };
@@ -7,7 +7,11 @@ use std::process::Command;
 
 pub fn command() -> Result<(), Error> {
     // Build project
-    let _ = crate::build::main()?;
+    let _ = crate::build::main(Options {
+        perform_codegen: true,
+        mode: Mode::Dev,
+        target: Some(Target::Erlang),
+    })?;
 
     // Don't exit on ctrl+c as it is used by child erlang shell
     ctrlc::set_handler(move || {}).expect("Error setting Ctrl-C handler");
@@ -29,7 +33,7 @@ pub fn command() -> Result<(), Error> {
     // Run the shell
     tracing::info!("Running OS process {:?}", command);
     let _ = command.status().map_err(|e| Error::ShellCommand {
-        command: "erl".to_string(),
+        program: "erl".to_string(),
         err: Some(e.kind()),
     })?;
     Ok(())

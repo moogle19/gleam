@@ -1,9 +1,10 @@
 ---
 source: compiler-core/src/javascript/tests/custom_types.rs
+assertion_line: 8
 expression: "\ntype Mine {\n    This\n    ThatOneIsAMuchMuchMuchMuchMuchMuchMuchMuchMuchMuchMuchMuchLongerVariant\n}\n\nfn go() {\n    This\n    ThatOneIsAMuchMuchMuchMuchMuchMuchMuchMuchMuchMuchMuchMuchLongerVariant\n}\n"
 
 ---
-import { CustomType } from "../gleam.js";
+import { CustomType } from "../gleam.mjs";
 
 class This extends CustomType {}
 

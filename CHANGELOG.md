@@ -1,6 +1,185 @@
 # Changelog
 
+## Unreleased
+
+- Added the ability to replace a release up to one hour after it is published
+  using `gleam publish --replace`
+- All commands that authenticate using the `ApiKeyCommand` trait (currently
+  `gleam publish`, `gleam docs publish`, `gleam docs remove`, `gleam hex retire`,
+  and `gleam hex unretire`) and now have access to environment variables for
+  username (default key `HEXPM_USER`) and password (default key `HEXPM_PASS`)
+- The `gleam publish` command gains the `-y/--yes` flag to disable the "are you
+  sure" prompt
+- Clear outdated files from the build directory after compilation.
+- Fixed a bug where immediately calling the value that a case expression
+  evaluates to could generate invalid JavaScript.
+- Fixed a bug where running a project on the Erlang target when the default
+  project target is set to JavaScript.
+
+## v0.21.0 - 2022-04-24
+
+- New projects are created with `gleam_stdlib` v0.21.
+
+## v0.21.0-rc2 - 2022-04-20
+
+- Added the ability to replace a release up to one hour after it is published
+  using `gleam publish --replace`.
+- The language server will now enter a degraded mode that only performs
+  formatting if running in a directory that is not a Gleam project with a
+  `gleam.toml`.
+
+## v0.21.0-rc1 - 2022-04-16
+
+- The Gleam language server is here! This will provide IDE like features for
+  code editors that support LSP, including but not limited to VSCode, Neovim,
+  Emacs, Eclipse, Visual Studio, and Atom. This first version includes these
+  features:
+  - Project compilation.
+  - Inline errors and warnings.
+  - Type information on hover.
+  - Go-to definition.
+  - Code formatting.
+- Fixed a bug in generated JavaScript code where functions named `then` would
+  cause errors when dynamically imported.
+- Initialize `git` repo when creating a new project.
+- Log messages controlled with `GLEAM_LOG` now print to standard error.
+- Log message colours can be disabled by setting the `GLEAM_LOG_NOCOLOUR`
+  environment variable.
+- You can now specify multiple packages when using `gleam add`.
+- Bools can now be negated with the `!` unary operator.
+- If the compiler version changes we now rebuild the project from scratch on
+  next build command to avoid issues arising from reading metadata in an old
+  format. (#1547)
+- Updated the "Unknown label" error message to match other error messages
+  (#1548)
+- Type holes are now permitted in function arguments and return annotations.
+  (#1519)
+- Unused module imports now emit a warning. (#1553)
+- The error message for failing to parse a multiline clauses without curly
+  braces has been improved with a hint on how to fix the issue. (#1555)
+- The error messages for when rebar3 or Erlang are missing from the machine has
+  been improved with a tip on how to install them. (#1567)
+- Corrected the hint given with certain int and float binary operator type
+  errors.
+- Add support for `int` and `float` bitstring type when compiling to JavaScript.
+- Add support for specifying size of integers in a bitstring. Supports only exact binaries,
+  i.e. length is a multiple of 8.
+- Fixed compilation of rebar3 based dependencies on Windows.
+
+## v0.20.1 - 2022-02-24
+
+- The type checker has been improved to enable use of the record access syntax
+  (`record.field`) in anonymous functions passed into higher order functions
+  without additional annotations.
+
+## v0.20.0 - 2022-02-23
+
+- New projects are created with `gleam_stdlib` v0.20.
+
+## v0.20.0-rc1 - 2022-02-20
+
+- Type unification errors involving user annotated types now refer to the names
+  specified by the user instead of internal rigid-type ids.
+- The build tool now validates that listed licenses are valid SPDX expressions.
+- A WebAssembly version of the compile is now available for use in JavaScript
+  and other WebAssembly environments.
+- New projects include Hex badges and a link to Hexdocs.
+- Enhance type mismatch errors in the presence of try.
+- Enhance type mismatch error for an inconsistent try.
+- Enhance type mismatch error for pipe expressions to show the whole pipeline
+  and not only its first line.
+- Fixed a bug where sometimes type variable could be reused result in incorrect
+  non-deterministic type errors.
+- Built in support for the Mix build tool has been removed. The `mix_gleam`
+  plugin is to be used instead.
+- Introduce a limited form of exhaustiveness checking for pattern matching
+  of custom types, which only checks that all constructor tags are covered
+  at the top level of patterns.
+- The `ebin` directory is now copied to the build directory for rebar3 managed
+  dependencies if present before compilation.
+- The format used by the formatter has been improved.
+- Package names in `gleam.toml` are validated when the config is read.
+- The `priv` directory is linked into the build directory for Gleam projects
+  managed by the build tool.
+- Fixed a bug where type errors from pipes could show incorrect information.
+- Fixed a bug where types could not be imported if they had the same name as a
+  value in the prelude.
+
+## v0.19.0 - 2022-01-12
+
+Dedicated to the memory of Muhammad Shaheer, a good and caring man.
+
+[Release Blog Post](https://gleam.run/news/gleam-v0.19-released/)
+
+## v0.19.0-rc4 - 2022-01-10
+
+- New projects are created with `gleam_stdlib` v0.19 and `gleeunit` v0.6.
+- Fixed a bug where external functions could be specified with the wrong module
+  name in generated Erlang when imported from a nested module in another
+  package.
+- Fixed a bug where warnings wouldn't get printed.
+
+## v0.19.0-rc3 - 2022-01-07
+
+- Fixed a bug where precompiled packages would fail to compile due to Erlang
+  files being compiled twice concurrently.
+
+## v0.19.0-rc2 - 2022-01-06
+
+- Erlang modules are now compiled in a multi-core fashion.
+- New projects are created with `erlef/setup-beam` v1.9.0 instead of
+  `gleam-lang/setup-erlang` and `gleam-lang/setup-gleam`.
+- Fixed a bug where tail call optimisation could generate incorrect code when
+  the function has argument names that are JavaScript keywords.
+- Fixed a bug where the build would continue when dependency packages failed to
+  compile.
+- Fixed a bug where `include` directories would not be accessible by the Erlang
+  compiler during Gleam compilation.
+
+## v0.19.0-rc1 - 2022-01-03
+
+- The build tool now supports the JavaScript target. The target can be specified
+  in either `gleam.toml` or using the `--target` flag.
+- The `gleam check` command has been introduced for rapidly verifying the types
+  of Gleam code without performing codegen.
+- `true` and `false` can no longer be used as pattern matching variables, to
+  avoid accidental uses of incorrect syntax that is popular in other languages.
+  An error will hint about using Gleam's `True` and `False` values instead.
+- You can now remove build artifacts using the new `gleam clean` command.
+- The `compile-package` can now generate `package.app` files and compile source
+  modules to `.beam` bytecode files.
+- The flags that `compile-package` accepts have changed.
+- Published Hex packages now include precompiled Erlang files.
+- Erlang record headers are now written to the `include` directory within the
+  package build directory.
+- The format used by the formatter has been improved.
+- Fixed a bug where tail recursion could sometimes generated incorrect
+  JavaScript code.
+- Performance of code generators has been slightly improved.
+- Allow the record in a record expansion to be an expression that returns a
+  record.
+- Fixed a bug where external function module names would not be escaped
+  correctly if they contained special characters and were assigned to a
+  variable.
+- A helpful error message is shown if Erlang is not installed.
+
+## v0.18.2 - 2021-12-12
+
+- Erlang applications are now automatically started when the VM is started by
+  `gleam run` and `gleam test`.
+
+## v0.18.1 - 2021-12-12
+
+- Fixed a bug where pipe expressions in record updates and operator expressions
+  could geneate incorrect Erlang code.
+- The `priv` directory is now copied to the output directory for rebar3 packages
+  prior to compilation. This is required for some packages to compile.
+- Fixed a bug where deps that fail to compile would be skipped when compilation
+  would next be attempted, resulting the project being in an invalid state.
+
 ## v0.18.0 - 2021-12-06
+
+[Release Blog Post](https://gleam.run/news/gleam-v0.18-released/)
 
 - New projects now include `gleeunit`.
 
@@ -40,6 +219,8 @@
 - New projects use v0.18 of the stdlib.
 
 ## v0.17.0 - 2021-09-20
+
+[Release Blog Post](https://gleam.run/news/gleam-v0.17-released/)
 
 - Functions now get special handling when being printed from JavaScript.
 
@@ -134,6 +315,8 @@
   JavaScript.
 
 ## v0.16.0 - 2021-06-17
+
+[Release Blog Post](https://gleam.run/news/gleam-v0.16-released/)
 
 ## v0.16.0-rc4 - 2021-06-17
 

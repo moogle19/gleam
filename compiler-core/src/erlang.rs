@@ -19,7 +19,7 @@ use crate::{
     },
     Result,
 };
-use heck::SnakeCase;
+use heck::ToSnakeCase;
 use itertools::Itertools;
 use lazy_static::lazy_static;
 use pattern::pattern;
@@ -66,15 +66,19 @@ pub fn generate_erlang(analysed: &[Analysed]) -> Vec<OutputFile> {
     files
 }
 
+fn module_name_to_erlang(module: &str) -> Document<'_> {
+    Document::String(module.replace('/', "@"))
+}
+
 fn module_name_join(module: &[String]) -> Document<'_> {
-    let mut name = Vec::with_capacity(module.len() * 2);
+    let mut name = String::new();
     for (i, segment) in module.iter().enumerate() {
         if i != 0 {
-            name.push("@".to_doc())
+            name.push('@')
         }
-        name.push(segment.to_doc())
+        name.push_str(segment)
     }
-    name.to_doc()
+    atom(name)
 }
 
 #[derive(Debug, Clone)]
@@ -624,7 +628,7 @@ fn expr_segment<'a>(
 
     let size = |expression: &'a TypedExpr, env: &mut Env<'a>| match expression {
         TypedExpr::Int { value, .. } => {
-            let v = value.replace("_", "");
+            let v = value.replace('_', "");
             let v = u64::from_str(&v).unwrap_or(0);
             Some(Document::String(format!(":{}", v)))
         }
@@ -771,12 +775,12 @@ fn bin_op<'a>(
 
     let left_expr = match left {
         TypedExpr::BinOp { .. } => expr(left, env).surround("(", ")"),
-        _ => expr(left, env),
+        _ => maybe_block_expr(left, env),
     };
 
     let right_expr = match right {
         TypedExpr::BinOp { .. } => expr(right, env).surround("(", ")"),
-        _ => expr(right, env),
+        _ => maybe_block_expr(right, env),
     };
 
     let div = |left: Document<'a>, right: Document<'a>| {
@@ -889,7 +893,7 @@ fn let_<'a>(value: &'a TypedExpr, pat: &'a TypedPattern, env: &mut Env<'a>) -> D
 }
 
 fn float<'a>(value: &str) -> Document<'a> {
-    let mut value = value.replace("_", "");
+    let mut value = value.replace('_', "");
     if value.ends_with('.') {
         value.push('0')
     }
@@ -937,9 +941,9 @@ fn var<'a>(name: &'a str, constructor: &'a ValueConstructor, env: &mut Env<'a>) 
             _ => atom(record_name.to_snake_case()),
         },
 
-        ValueConstructorVariant::LocalVariable => env.local_var_name(name),
+        ValueConstructorVariant::LocalVariable { .. } => env.local_var_name(name),
 
-        ValueConstructorVariant::ModuleConstant { literal } => const_inline(literal, env),
+        ValueConstructorVariant::ModuleConstant { literal, .. } => const_inline(literal, env),
 
         ValueConstructorVariant::ModuleFn {
             arity, ref module, ..
@@ -967,7 +971,7 @@ fn var<'a>(name: &'a str, constructor: &'a ValueConstructor, env: &mut Env<'a>) 
 fn int<'a>(value: &str) -> Document<'a> {
     Document::String(
         value
-            .replace("_", "")
+            .replace('_', "")
             .replace("0x", "16#")
             .replace("0o", "8#")
             .replace("0b", "2#"),
@@ -1239,11 +1243,11 @@ fn docs_args_call<'a>(
         TypedExpr::ModuleSelect {
             module_name,
             label,
-            constructor: ModuleValueConstructor::Fn,
+            constructor: ModuleValueConstructor::Fn { .. },
             ..
         } => {
             let args = wrap_args(args);
-            atom(module_name.join("@"))
+            atom(module_name.replace('/', "@"))
                 .append(":")
                 .append(atom(label.to_string()))
                 .append(args)
@@ -1299,7 +1303,7 @@ fn record_update<'a>(
         // Increment the index by 2, because the first element
         // is the name of the record, so our fields are 2-indexed
         let index_doc = (arg.index + 2).to_doc();
-        let value_doc = expr(&arg.value, env);
+        let value_doc = maybe_block_expr(&arg.value, env);
 
         "erlang:setelement"
             .to_doc()
@@ -1321,7 +1325,7 @@ fn begin_end(document: Document<'_>) -> Document<'_> {
 ///
 fn maybe_block_expr<'a>(expression: &'a TypedExpr, env: &mut Env<'a>) -> Document<'a> {
     match &expression {
-        TypedExpr::Sequence { .. } | TypedExpr::Assignment { .. } => {
+        TypedExpr::Pipeline { .. } | TypedExpr::Sequence { .. } | TypedExpr::Assignment { .. } => {
             begin_end(expr(expression, env))
         }
         _ => expr(expression, env),
@@ -1387,7 +1391,9 @@ fn expr<'a>(expression: &'a TypedExpr, env: &mut Env<'a>) -> Document<'a> {
         TypedExpr::Int { value, .. } => int(value),
         TypedExpr::Float { value, .. } => float(value),
         TypedExpr::String { value, .. } => string(value),
-        TypedExpr::Sequence { expressions, .. } => seq(expressions, env),
+        TypedExpr::Pipeline { expressions, .. } | TypedExpr::Sequence { expressions, .. } => {
+            seq(expressions, env)
+        }
 
         TypedExpr::TupleIndex { tuple, index, .. } => tuple_index(tuple, *index, env),
 
@@ -1396,6 +1402,8 @@ fn expr<'a>(expression: &'a TypedExpr, env: &mut Env<'a>) -> Document<'a> {
         } => var(name, constructor, env),
 
         TypedExpr::Fn { args, body, .. } => fun(args, body, env),
+
+        TypedExpr::Negate { value, .. } => negate(value, env),
 
         TypedExpr::List { elements, tail, .. } => expr_list(elements, tail, env),
 
@@ -1407,7 +1415,7 @@ fn expr<'a>(expression: &'a TypedExpr, env: &mut Env<'a>) -> Document<'a> {
         } => atom(name.to_snake_case()),
 
         TypedExpr::ModuleSelect {
-            constructor: ModuleValueConstructor::Constant { literal },
+            constructor: ModuleValueConstructor::Constant { literal, .. },
             ..
         } => const_inline(literal, env),
 
@@ -1430,7 +1438,7 @@ fn expr<'a>(expression: &'a TypedExpr, env: &mut Env<'a>) -> Document<'a> {
             typ,
             label,
             module_name,
-            constructor: ModuleValueConstructor::Fn,
+            constructor: ModuleValueConstructor::Fn { .. },
             ..
         } => module_select_fn(typ.clone(), module_name, label),
 
@@ -1477,6 +1485,10 @@ fn expr<'a>(expression: &'a TypedExpr, env: &mut Env<'a>) -> Document<'a> {
     }
 }
 
+fn negate<'a>(value: &'a TypedExpr, env: &mut Env<'a>) -> Document<'a> {
+    docvec!["not ", maybe_block_expr(value, env)]
+}
+
 fn tuple_index<'a>(tuple: &'a TypedExpr, index: u64, env: &mut Env<'a>) -> Document<'a> {
     let index_doc = Document::String(format!("{}", (index + 1)));
     let tuple_doc = expr(tuple, env);
@@ -1485,17 +1497,17 @@ fn tuple_index<'a>(tuple: &'a TypedExpr, index: u64, env: &mut Env<'a>) -> Docum
         .append(wrap_args([index_doc, tuple_doc]))
 }
 
-fn module_select_fn<'a>(typ: Arc<Type>, module_name: &'a [String], label: &'a str) -> Document<'a> {
+fn module_select_fn<'a>(typ: Arc<Type>, module_name: &'a str, label: &'a str) -> Document<'a> {
     match crate::type_::collapse_links(typ).as_ref() {
         crate::type_::Type::Fn { args, .. } => "fun "
             .to_doc()
-            .append(module_name_join(module_name))
+            .append(module_name_to_erlang(module_name))
             .append(":")
             .append(atom(label.to_string()))
             .append("/")
             .append(args.len()),
 
-        _ => module_name_join(module_name)
+        _ => module_name_to_erlang(module_name)
             .append(":")
             .append(atom(label.to_string()))
             .append("()"),
@@ -1568,7 +1580,7 @@ fn variable_name(name: &str) -> String {
 // When rendering a type variable to an erlang type spec we need all type variables with the
 // same id to end up with the same name in the generated erlang.
 // This function converts a usize into base 26 A-Z for this purpose.
-fn id_to_type_var(id: usize) -> Document<'static> {
+fn id_to_type_var(id: u64) -> Document<'static> {
     if id < 26 {
         let mut name = "".to_string();
         name.push(std::char::from_u32((id % 26 + 65) as u32).expect("id_to_type_var 0"));
@@ -1700,16 +1712,16 @@ pub fn is_erlang_standard_library_module(name: &str) -> bool {
 //     fn() -> Result(a, b)  // `a` and `b` are `any()`
 //     fn(a) -> a            // `a` is a type var
 fn collect_type_var_usages<'a>(
-    mut ids: HashMap<usize, usize>,
+    mut ids: HashMap<u64, u64>,
     types: impl IntoIterator<Item = &'a Arc<Type>>,
-) -> HashMap<usize, usize> {
+) -> HashMap<u64, u64> {
     for typ in types {
         type_var_ids(typ, &mut ids);
     }
     ids
 }
 
-fn type_var_ids(type_: &Type, ids: &mut HashMap<usize, usize>) {
+fn type_var_ids(type_: &Type, ids: &mut HashMap<u64, u64>) {
     match type_ {
         Type::Var { type_: typ } => match typ.borrow().deref() {
             TypeVar::Generic { id, .. } | TypeVar::Unbound { id, .. } => {
@@ -1789,7 +1801,7 @@ fn erl_safe_type_name(mut name: String) -> String {
 struct TypePrinter<'a> {
     var_as_any: bool,
     current_module: &'a [String],
-    var_usages: Option<&'a HashMap<usize, usize>>,
+    var_usages: Option<&'a HashMap<u64, u64>>,
 }
 
 impl<'a> TypePrinter<'a> {
@@ -1801,7 +1813,7 @@ impl<'a> TypePrinter<'a> {
         }
     }
 
-    pub fn with_var_usages(mut self, var_usages: &'a HashMap<usize, usize>) -> Self {
+    pub fn with_var_usages(mut self, var_usages: &'a HashMap<u64, u64>) -> Self {
         self.var_usages = Some(var_usages);
         self
     }

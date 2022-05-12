@@ -87,9 +87,8 @@ impl<'module> Generator<'module> {
             docvec!["let ", var, " = loop$", name, ";", line()]
         }));
         Ok(docvec!(
-            loop_assignments,
             "while (true) {",
-            docvec!(line(), body).nest(INDENT),
+            docvec!(line(), loop_assignments, body).nest(INDENT),
             line(),
             "}"
         ))
@@ -133,7 +132,9 @@ impl<'module> Generator<'module> {
                 name, constructor, ..
             } => Ok(self.variable(name, constructor)),
 
-            TypedExpr::Sequence { expressions, .. } => self.sequence(expressions),
+            TypedExpr::Pipeline { expressions, .. } | TypedExpr::Sequence { expressions, .. } => {
+                self.sequence(expressions)
+            }
 
             TypedExpr::Assignment { value, pattern, .. } => self.assignment(value, pattern),
 
@@ -160,12 +161,18 @@ impl<'module> Generator<'module> {
                 constructor,
                 ..
             } => Ok(self.module_select(module_alias, label, constructor)),
+
+            TypedExpr::Negate { value, .. } => self.negate(value),
         }?;
         Ok(if expression.handles_own_return() {
             document
         } else {
             self.wrap_return(document)
         })
+    }
+
+    fn negate<'a>(&mut self, value: &'a TypedExpr) -> Output<'a> {
+        self.not_in_tail_position(|gen| Ok(docvec!("!", gen.wrap_expression(value)?)))
     }
 
     fn bit_string<'a>(&mut self, segments: &'a [TypedExprBitStringSegment]) -> Output<'a> {
@@ -178,7 +185,20 @@ impl<'module> Generator<'module> {
             let value = self.not_in_tail_position(|gen| gen.wrap_expression(&segment.value))?;
             match segment.options.as_slice() {
                 // Ints
-                [] => Ok(value),
+                [] | [Opt::Int { .. }] => Ok(value),
+
+                // Sized ints
+                [Opt::Size { value: size, .. }] => {
+                    self.tracker.sized_integer_segment_used = true;
+                    let size = self.not_in_tail_position(|gen| gen.wrap_expression(size))?;
+                    Ok(docvec!["sizedInteger(", value, ", ", size, ")"])
+                }
+
+                // Floats
+                [Opt::Float { .. }] => {
+                    self.tracker.float_bit_string_segment_used = true;
+                    Ok(docvec!["float64Bits(", value, ")"])
+                }
 
                 // UTF8 strings
                 [Opt::Utf8 { .. }] => {
@@ -232,6 +252,7 @@ impl<'module> Generator<'module> {
             TypedExpr::Todo { .. }
             | TypedExpr::Case { .. }
             | TypedExpr::Sequence { .. }
+            | TypedExpr::Pipeline { .. }
             | TypedExpr::Assignment { .. }
             | TypedExpr::Try { .. } => self.immediately_involked_function_expression(expression),
             _ => self.expression(expression),
@@ -248,6 +269,7 @@ impl<'module> Generator<'module> {
             }
             TypedExpr::Case { .. }
             | TypedExpr::Sequence { .. }
+            | TypedExpr::Pipeline { .. }
             | TypedExpr::Assignment { .. }
             | TypedExpr::Try { .. } => self.immediately_involked_function_expression(expression),
             _ => self.expression(expression),
@@ -288,7 +310,7 @@ impl<'module> Generator<'module> {
             }
             ValueConstructorVariant::ModuleFn { .. }
             | ValueConstructorVariant::ModuleConstant { .. }
-            | ValueConstructorVariant::LocalVariable => self.local_var(name),
+            | ValueConstructorVariant::LocalVariable { .. } => self.local_var(name),
         }
     }
 
@@ -620,7 +642,7 @@ impl<'module> Generator<'module> {
     fn assignment_no_match<'a>(&mut self, location: SrcSpan, subject: Document<'a>) -> Output<'a> {
         Ok(self.throw_error(
             "assignment_no_match",
-            "Assignment pattern did not much",
+            "Assignment pattern did not match",
             location,
             [("value", subject)],
         ))
@@ -692,7 +714,7 @@ impl<'module> Generator<'module> {
 
                 for (i, (element, argument)) in arguments
                     .into_iter()
-                    .zip(self.function_arguments.clone())
+                    .zip(&self.function_arguments)
                     .enumerate()
                 {
                     if i != 0 {
@@ -700,7 +722,8 @@ impl<'module> Generator<'module> {
                     }
                     // Create an assignment for each variable created by the function arguments
                     if let Some(name) = argument {
-                        docs.push(Document::String(maybe_escape_identifier_string(name)));
+                        docs.push("loop$".to_doc());
+                        docs.push(Document::String((*name).to_string()));
                         docs.push(" = ".to_doc());
                     }
                     // Render the value given to the function. Even if it is not
@@ -715,7 +738,7 @@ impl<'module> Generator<'module> {
             _ => {
                 let fun = self.not_in_tail_position(|gen| {
                     let is_fn_literal = matches!(fun, TypedExpr::Fn { .. });
-                    let fun = gen.expression(fun)?;
+                    let fun = gen.wrap_expression(fun)?;
                     if is_fn_literal {
                         Ok(docvec!("(", fun, ")"))
                     } else {
@@ -946,7 +969,7 @@ impl<'module> Generator<'module> {
         constructor: &'a ModuleValueConstructor,
     ) -> Document<'a> {
         match constructor {
-            ModuleValueConstructor::Fn | ModuleValueConstructor::Constant { .. } => {
+            ModuleValueConstructor::Fn { .. } | ModuleValueConstructor::Constant { .. } => {
                 docvec!["$", module, ".", maybe_escape_identifier_doc(label)]
             }
 
@@ -1189,6 +1212,7 @@ impl TypedExpr {
                 | TypedExpr::Call { .. }
                 | TypedExpr::Case { .. }
                 | TypedExpr::Sequence { .. }
+                | TypedExpr::Pipeline { .. }
                 | TypedExpr::Assignment { .. }
         )
     }

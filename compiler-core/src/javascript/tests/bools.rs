@@ -57,9 +57,9 @@ fn shadowed_bools_and_nil() {
         r#"
 pub type True { True False Nil }
 fn go(x, y) {
-  let True = x
-  let False = x
-  let Nil = y
+  assert True = x
+  assert False = x
+  assert Nil = y
 }
 "#,
     );
@@ -108,5 +108,26 @@ fn go(a) {
   }
 }
 "#,
+    );
+}
+
+#[test]
+fn negation() {
+    assert_js!(
+        "pub fn negate(x) {
+    !x
+}"
+    );
+}
+
+#[test]
+fn negation_block() {
+    assert_js!(
+        "pub fn negate(x) {
+  !{
+    123
+    x
+  }
+}"
     );
 }

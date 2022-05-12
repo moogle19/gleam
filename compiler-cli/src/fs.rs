@@ -1,19 +1,19 @@
-// use flate2::{write::GzEncoder, Compression};
 use gleam_core::{
     error::{Error, FileIoAction, FileKind},
     io::{
-        CommandExecutor, FileSystemIO, FileSystemWriter, OutputFile, WrappedReader, WrappedWriter,
+        CommandExecutor, DirEntry, FileSystemIO, FileSystemWriter, OutputFile, ReadDir,
+        WrappedReader, WrappedWriter,
     },
     Result,
 };
-use ignore::DirEntry;
 use lazy_static::lazy_static;
 use std::{
     ffi::OsStr,
     fmt::Debug,
     fs::File,
-    io::{BufRead, BufReader, Write},
+    io::{self, BufRead, BufReader, Write},
     path::{Path, PathBuf},
+    process::Stdio,
 };
 
 /// A `FileWriter` implementation that writes to the file system.
@@ -73,8 +73,12 @@ impl gleam_core::io::FileSystemReader for ProjectIO {
         reader(path)
     }
 
-    fn read_dir(&self, path: &Path) -> Result<std::fs::ReadDir> {
-        read_dir(path)
+    fn read_dir(&self, path: &Path) -> Result<ReadDir> {
+        read_dir(path).map(|entries| {
+            entries
+                .map(|result| result.map(|entry| DirEntry::from_path(entry.path())))
+                .collect()
+        })
     }
 }
 
@@ -98,6 +102,18 @@ impl FileSystemWriter for ProjectIO {
     fn mkdir(&self, path: &Path) -> Result<(), Error> {
         mkdir(path)
     }
+
+    fn hardlink(&self, from: &Path, to: &Path) -> Result<(), Error> {
+        hardlink(from, to)
+    }
+
+    fn symlink_dir(&self, from: &Path, to: &Path) -> Result<(), Error> {
+        symlink_dir(from, to)
+    }
+
+    fn delete_file(&self, path: &Path) -> Result<()> {
+        delete_file(path)
+    }
 }
 
 impl CommandExecutor for ProjectIO {
@@ -107,17 +123,36 @@ impl CommandExecutor for ProjectIO {
         args: &[String],
         env: &[(&str, String)],
         cwd: Option<&Path>,
-    ) -> Result<std::process::ExitStatus, Error> {
+        quiet: bool,
+    ) -> Result<i32, Error> {
         tracing::debug!(program=program, args=?args.join(" "), env=?env, cwd=?cwd, "command_exec");
-        std::process::Command::new(program)
+        let stdout = if quiet {
+            Stdio::null()
+        } else {
+            Stdio::inherit()
+        };
+        let result = std::process::Command::new(program)
             .args(args)
+            .stdin(Stdio::null())
+            .stdout(stdout)
             .envs(env.iter().map(|(a, b)| (a, b)))
             .current_dir(cwd.unwrap_or_else(|| Path::new("./")))
-            .status()
-            .map_err(|e| Error::ShellCommand {
-                command: program.to_ascii_uppercase(),
-                err: Some(e.kind()),
-            })
+            .status();
+
+        match result {
+            Ok(status) => Ok(status.code().unwrap_or_default()),
+
+            Err(error) => Err(match error.kind() {
+                io::ErrorKind::NotFound => Error::ShellProgramNotFound {
+                    program: program.to_string(),
+                },
+
+                other => Error::ShellCommand {
+                    program: program.to_string(),
+                    err: Some(other),
+                },
+            }),
+        }
     }
 }
 
@@ -138,20 +173,20 @@ pub fn delete_dir(dir: &Path) -> Result<(), Error> {
     Ok(())
 }
 
-// pub fn delete(file: &PathBuf) -> Result<(), Error> {
-//     tracing::debug!("Deleting file {:?}", file);
-//     if file.exists() {
-//         std::fs::remove_file(&file).map_err(|e| Error::FileIO {
-//             action: FileIOAction::Delete,
-//             kind: FileKind::File,
-//             path: file.clone(),
-//             err: Some(e.to_string()),
-//         })?;
-//     } else {
-//         tracing::debug!("Did not exist for deletion: {:?}", file);
-//     }
-//     Ok(())
-// }
+pub fn delete_file(file: &Path) -> Result<(), Error> {
+    tracing::debug!("Deleting file {:?}", file);
+    if file.exists() {
+        std::fs::remove_file(&file).map_err(|e| Error::FileIo {
+            action: FileIoAction::Delete,
+            kind: FileKind::File,
+            path: file.to_path_buf(),
+            err: Some(e.to_string()),
+        })?;
+    } else {
+        tracing::debug!("Did not exist for deletion: {:?}", file);
+    }
+    Ok(())
+}
 
 pub fn write_outputs_under(outputs: &[OutputFile], base: &Path) -> Result<(), Error> {
     for file in outputs {
@@ -297,8 +332,22 @@ pub fn gleam_files_excluding_gitignore(dir: &Path) -> impl Iterator<Item = PathB
         .into_iter()
         .filter_map(Result::ok)
         .filter(|e| e.file_type().map(|t| t.is_file()).unwrap_or(false))
-        .map(DirEntry::into_path)
+        .map(ignore::DirEntry::into_path)
         .filter(move |d| is_gleam_path(d, dir))
+}
+
+pub fn native_files(dir: &Path) -> Result<impl Iterator<Item = PathBuf> + '_> {
+    Ok(read_dir(dir)?
+        .flat_map(Result::ok)
+        .map(|e| e.path())
+        .filter(|path| {
+            let extension = path
+                .extension()
+                .unwrap_or_default()
+                .to_str()
+                .unwrap_or_default();
+            extension == "erl" || extension == "hrl" || extension == "js" || extension == "mjs"
+        }))
 }
 
 pub fn erlang_files(dir: &Path) -> Result<impl Iterator<Item = PathBuf> + '_> {
@@ -437,4 +486,57 @@ pub fn copy_dir(path: impl AsRef<Path> + Debug, to: impl AsRef<Path> + Debug) ->
             err: Some(err.to_string()),
         })
         .map(|_| ())
+}
+
+pub fn symlink_dir(
+    src: impl AsRef<Path> + Debug,
+    dest: impl AsRef<Path> + Debug,
+) -> Result<(), Error> {
+    tracing::debug!(src=?src, dest=?dest, "symlinking");
+    symlink::symlink_dir(&canonicalise(src.as_ref())?, dest.as_ref()).map_err(|err| {
+        Error::FileIo {
+            action: FileIoAction::Link,
+            kind: FileKind::File,
+            path: PathBuf::from(dest.as_ref()),
+            err: Some(err.to_string()),
+        }
+    })?;
+    Ok(())
+}
+
+pub fn hardlink(from: impl AsRef<Path> + Debug, to: impl AsRef<Path> + Debug) -> Result<(), Error> {
+    tracing::debug!(from=?from, to=?to, "hardlinking");
+    std::fs::hard_link(&from, &to)
+        .map_err(|err| Error::FileIo {
+            action: FileIoAction::Link,
+            kind: FileKind::File,
+            path: PathBuf::from(from.as_ref()),
+            err: Some(err.to_string()),
+        })
+        .map(|_| ())
+}
+
+pub fn git_init(path: &Path) -> Result<(), Error> {
+    tracing::debug!(path=?path, "initializing git");
+
+    let args = vec!["init".into(), "--quiet".into(), path.display().to_string()];
+
+    match ProjectIO::new().exec("git", &args, &[], None, false) {
+        Ok(_) => Ok(()),
+        Err(err) => match err {
+            Error::ShellProgramNotFound { .. } => Ok(()),
+            _ => Err(Error::GitInitialization {
+                error: err.to_string(),
+            }),
+        },
+    }
+}
+
+fn canonicalise(path: &Path) -> Result<PathBuf, Error> {
+    std::fs::canonicalize(path).map_err(|err| Error::FileIo {
+        action: FileIoAction::Canonicalise,
+        kind: FileKind::File,
+        path: PathBuf::from(path),
+        err: Some(err.to_string()),
+    })
 }

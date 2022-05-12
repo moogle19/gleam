@@ -1,9 +1,10 @@
 ---
 source: compiler-core/src/javascript/tests/lists.rs
+assertion_line: 52
 expression: "\nfn go(x, y) {\n  let [] = x\n  let [a] = x\n  let [1, 2] = x\n  let [_, #(3, b)] = y\n  let [head, ..tail] = y\n}\n"
 
 ---
-import { throwError } from "../gleam.js";
+import { throwError } from "../gleam.mjs";
 
 function go(x, y) {
   if (!x.hasLength(0)) {
@@ -12,7 +13,7 @@ function go(x, y) {
       "my/mod",
       3,
       "go",
-      "Assignment pattern did not much",
+      "Assignment pattern did not match",
       { value: x }
     );
   }
@@ -22,7 +23,7 @@ function go(x, y) {
       "my/mod",
       4,
       "go",
-      "Assignment pattern did not much",
+      "Assignment pattern did not match",
       { value: x }
     );
   }
@@ -33,7 +34,7 @@ function go(x, y) {
       "my/mod",
       5,
       "go",
-      "Assignment pattern did not much",
+      "Assignment pattern did not match",
       { value: x }
     );
   }
@@ -43,7 +44,7 @@ function go(x, y) {
       "my/mod",
       6,
       "go",
-      "Assignment pattern did not much",
+      "Assignment pattern did not match",
       { value: y }
     );
   }
@@ -54,7 +55,7 @@ function go(x, y) {
       "my/mod",
       7,
       "go",
-      "Assignment pattern did not much",
+      "Assignment pattern did not match",
       { value: y }
     );
   }

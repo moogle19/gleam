@@ -5,11 +5,16 @@ use crate::{
     },
     codegen::{self, ErlangApp},
     config::PackageConfig,
+    error::{FileIoAction, FileKind},
     io::{CommandExecutor, FileSystemIO, FileSystemWriter},
     metadata, paths,
     project::ManifestPackage,
-    type_, warning, Error, Result, Warning,
+    type_,
+    uid::UniqueIdGenerator,
+    version::COMPILER_VERSION,
+    warning, Error, Result, Warning,
 };
+use itertools::Itertools;
 use std::{
     collections::{HashMap, HashSet},
     fmt::Write,
@@ -18,79 +23,234 @@ use std::{
     time::Instant,
 };
 
+// On Windows we have to call rebar3 via a little wrapper script.
+//
+#[cfg(not(target_os = "windows"))]
+const REBAR_EXECUTABLE: &str = "rebar3";
+#[cfg(target_os = "windows")]
+const REBAR_EXECUTABLE: &str = "rebar3.cmd";
+
 #[derive(Debug)]
-pub struct ProjectCompiler<'a, IO> {
+pub struct Options {
+    pub mode: Mode,
+    pub target: Option<Target>,
+    /// Whether to perform codegen for the root project. Dependencies always
+    /// have codegen run. Use for the `gleam check` command.
+    /// If future when we have per-module incremental builds we will need to
+    /// track both whether type metadata has been produced and also whether
+    /// codegen has been performed. As such there will be 2 kinds of caching.
+    pub perform_codegen: bool,
+}
+
+#[derive(Debug)]
+pub struct ProjectCompiler<IO> {
     config: PackageConfig,
-    packages: HashMap<String, &'a ManifestPackage>,
-    importable_modules: HashMap<String, type_::Module>,
-    defined_modules: HashMap<String, PathBuf>,
+    packages: HashMap<String, ManifestPackage>,
+    importable_modules: im::HashMap<String, type_::Module>,
+    defined_modules: im::HashMap<String, PathBuf>,
     warnings: Vec<Warning>,
     telemetry: Box<dyn Telemetry>,
+    options: Options,
+    ids: UniqueIdGenerator,
     io: IO,
+    build_journal: HashSet<PathBuf>,
+    /// We may want to silence subprocess stdout if we are running in LSP mode.
+    /// The language server talks over stdio so printing would break that.
+    pub silence_subprocess_stdout: bool,
 }
 
 // TODO: test that tests cannot be imported into src
 // TODO: test that dep cycles are not allowed between packages
 
-impl<'a, IO> ProjectCompiler<'a, IO>
+impl<IO> ProjectCompiler<IO>
 where
     IO: CommandExecutor + FileSystemIO + Clone,
 {
     pub fn new(
         config: PackageConfig,
-        packages: &'a [ManifestPackage],
+        options: Options,
+        packages: Vec<ManifestPackage>,
         telemetry: Box<dyn Telemetry>,
         io: IO,
     ) -> Self {
-        let estimated_modules = packages.len() * 5;
-        let packages = packages.iter().map(|p| (p.name.to_string(), p)).collect();
+        let packages = packages
+            .into_iter()
+            .map(|p| (p.name.to_string(), p))
+            .collect();
+
         Self {
-            importable_modules: HashMap::with_capacity(estimated_modules),
-            defined_modules: HashMap::with_capacity(estimated_modules),
+            importable_modules: im::HashMap::new(),
+            defined_modules: im::HashMap::new(),
+            ids: UniqueIdGenerator::new(),
             warnings: Vec::new(),
-            config,
+            silence_subprocess_stdout: false,
             telemetry,
             packages,
+            options,
+            config,
             io,
+            build_journal: HashSet::new(),
         }
+    }
+
+    // TODO: test
+    pub fn checkpoint(&self) -> CheckpointState {
+        CheckpointState {
+            importable_modules: self.importable_modules.clone(),
+            defined_modules: self.defined_modules.clone(),
+            ids: self.ids.fork(),
+        }
+    }
+
+    // TODO: test
+    pub fn restore(&mut self, checkpoint: CheckpointState) {
+        self.importable_modules = checkpoint.importable_modules;
+        self.defined_modules = checkpoint.defined_modules;
+        self.ids = checkpoint.ids;
+    }
+
+    pub fn mode(&self) -> Mode {
+        self.options.mode
+    }
+
+    pub fn take_warnings(&mut self) -> Vec<Warning> {
+        std::mem::take(&mut self.warnings)
+    }
+
+    pub fn target(&self) -> Target {
+        self.options.target.unwrap_or(self.config.target)
     }
 
     /// Returns the compiled information from the root package
-    pub fn compile(mut self) -> Result<Package> {
-        // Determine package processing order
-        let sequence = order_packages(&self.packages)?;
+    pub fn compile(&mut self) -> Result<Package> {
+        self.check_gleam_version()?;
+        self.compile_dependencies()?;
 
-        // Read and type check deps packages
-        for name in sequence {
-            let package = self.packages.remove(&name).expect("Missing package config");
-            self.load_cache_or_compile_package(package)?;
+        if self.options.perform_codegen {
+            self.telemetry.compiling_package(&self.config.name);
+        } else {
+            self.telemetry.checking_package(&self.config.name);
+        }
+        let result = self.compile_root_package();
+
+        self.check_build_journal()?;
+
+        // Print warnings
+        for warning in &self.warnings {
+            self.telemetry.warning(warning);
         }
 
-        // Read and type check top level package
-        self.telemetry.compiling_package(&self.config.name);
-        let config = std::mem::take(&mut self.config);
-        self.compile_gleam_package(&config, paths::src(), Some(paths::test()))
+        result
+    }
+
+    pub fn compile_root_package(&mut self) -> Result<Package, Error> {
+        let config = self.config.clone();
+        let modules = self.compile_gleam_package(&config, true, paths::root())?;
+
+        Ok(Package { config, modules })
+    }
+
+    /// Checks that version file found in the build directory matches the
+    /// current version of gleam. If not, we will clear the build directory
+    /// before continuing. This will ensure that upgrading gleam will not leave
+    /// one with confusing or hard to debug states.
+    pub fn check_gleam_version(&self) -> Result<(), Error> {
+        let build_path = paths::build_packages(self.mode(), self.target());
+        let version_path = paths::build_gleam_version(self.mode(), self.target());
+        if self.io.is_file(&version_path) {
+            let version = self.io.read(&version_path)?;
+            if version == COMPILER_VERSION {
+                return Ok(());
+            }
+        }
+
+        // Either file is missing our the versions do not match. Time to rebuild
+        tracing::info!("removing_build_state_from_different_gleam_version");
+        self.io.delete(&build_path)?;
+
+        // Recreate build directory with new updated version file
+        self.io.mkdir(&build_path)?;
+        let mut writer = self.io.writer(&version_path)?;
+        writer
+            .write_str(COMPILER_VERSION)
+            .map_err(|e| Error::FileIo {
+                action: FileIoAction::WriteTo,
+                kind: FileKind::File,
+                path: version_path,
+                err: Some(e.to_string()),
+            })
+    }
+
+    /// Checks that build journal file found in the build directory matches the
+    /// current build of gleam. If not, we will clear the outdated files
+    pub fn check_build_journal(&self) -> Result<(), Error> {
+        let build_path = paths::build_packages(self.mode(), self.target());
+        let journal_path = paths::build_journal(self.mode(), self.target());
+        if self.io.is_file(&journal_path) {
+            let io_journals = self.io.read(&journal_path)?;
+            let old_journals: HashSet<PathBuf> = io_journals.lines().map(PathBuf::from).collect();
+
+            tracing::info!("Deleting outdated build files");
+            for diff in old_journals.difference(&self.build_journal) {
+                self.io.delete_file(Path::new(&diff));
+            }
+        }
+
+        let mut writer = self.io.writer(&journal_path)?;
+        writer
+            .write_str(
+                &self
+                    .build_journal
+                    .iter()
+                    .map(|b| b.to_string_lossy().to_string())
+                    .join("\n"),
+            )
+            .map_err(|e| Error::FileIo {
+                action: FileIoAction::WriteTo,
+                kind: FileKind::File,
+                path: journal_path,
+                err: Some(e.to_string()),
+            })
+    }
+
+    pub fn compile_dependencies(&mut self) -> Result<(), Error> {
+        let sequence = order_packages(&self.packages)?;
+
+        for name in sequence {
+            let package = self.packages.remove(&name).expect("Missing package config");
+            self.load_cache_or_compile_package(&package)?;
+        }
+
+        Ok(())
     }
 
     fn load_cache_or_compile_package(&mut self, package: &ManifestPackage) -> Result<(), Error> {
-        let build_path = paths::build_package(Mode::Dev, Target::Erlang, &package.name);
+        let build_path = paths::build_package(self.mode(), self.target(), &package.name);
         if self.io.is_directory(&build_path) {
-            tracing::info!(package=%package.name, "Loading precompiled package");
+            tracing::info!(package=%package.name, "loading_precompiled_package");
             return self.load_cached_package(build_path, package);
         }
 
         self.telemetry.compiling_package(&package.name);
-        match usable_build_tool(package)? {
-            BuildTool::Gleam => self.compile_gleam_dep_package(package)?,
-            BuildTool::Rebar3 => self.compile_rebar3_dep_package(package)?,
+        let result = match usable_build_tool(package)? {
+            BuildTool::Gleam => self.compile_gleam_dep_package(package),
+            BuildTool::Rebar3 => self.compile_rebar3_dep_package(package),
+        };
+
+        // TODO: test. This one is not covered by the integration tests.
+        if result.is_err() {
+            tracing::debug!(package=%package.name, "removing_failed_build");
+            let dir = paths::build_package(self.mode(), self.target(), &package.name);
+            self.io.delete(&dir)?;
         }
-        Ok(())
+
+        result
     }
 
     fn compile_rebar3_dep_package(&mut self, package: &ManifestPackage) -> Result<(), Error> {
         let name = &package.name;
-        let mode = Mode::Dev;
-        let target = Target::Erlang;
+        let mode = self.mode();
+        let target = self.target();
 
         let project_dir = paths::build_deps_package(&package.name);
         let up = paths::unnest(&project_dir);
@@ -103,11 +263,34 @@ where
         // we may need to copy the include directory into there
         self.io.mkdir(&dest)?;
 
+        // TODO: unit test
         let src_include = project_dir.join("include");
         if self.io.is_directory(&src_include) {
             tracing::debug!("copying_include_to_build");
             // TODO: This could be a symlink
             self.io.copy_dir(&src_include, &dest)?;
+        }
+
+        // TODO: unit test
+        let priv_dir = project_dir.join("priv");
+        if self.io.is_directory(&priv_dir) {
+            tracing::debug!("copying_priv_to_build");
+            // TODO: This could be a symlink
+            self.io.copy_dir(&priv_dir, &dest)?;
+        }
+
+        // TODO: unit test
+        let ebin_dir = project_dir.join("ebin");
+        if self.io.is_directory(&ebin_dir) {
+            tracing::debug!("copying_ebin_to_build");
+            // TODO: This could be a symlink
+            self.io.copy_dir(&ebin_dir, &dest)?;
+        }
+
+        // TODO: test
+        if target != Target::Erlang {
+            tracing::info!("skipping_rebar3_build_for_non_erlang_target");
+            return Ok(());
         }
 
         let env = [
@@ -122,13 +305,19 @@ where
             "--paths".into(),
             rebar3_path(&ebins),
         ];
-        let status = self.io.exec("rebar3", &args, &env, Some(&project_dir))?;
+        let status = self.io.exec(
+            REBAR_EXECUTABLE,
+            &args,
+            &env,
+            Some(&project_dir),
+            self.silence_subprocess_stdout,
+        )?;
 
-        if status.success() {
+        if status == 0 {
             Ok(())
         } else {
             Err(Error::ShellCommand {
-                command: "rebar3".to_string(),
+                program: "rebar3".to_string(),
                 err: None,
             })
         }
@@ -137,8 +326,9 @@ where
     fn compile_gleam_dep_package(&mut self, package: &ManifestPackage) -> Result<(), Error> {
         let config_path = paths::build_deps_package_config(&package.name);
         let config = PackageConfig::read(config_path, &self.io)?;
-        let src = paths::build_deps_package_src(&package.name);
-        self.compile_gleam_package(&config, src, None).map(|_| ())?;
+        let root = paths::build_deps_package(&package.name);
+        self.compile_gleam_package(&config, false, root)
+            .map(|_| ())?;
         Ok(())
     }
 
@@ -149,7 +339,7 @@ where
     ) -> Result<(), Error> {
         for path in self.io.gleam_metadata_files(&build_dir) {
             let reader = BufReader::new(self.io.reader(&path)?);
-            let module = metadata::ModuleDecoder::new().read(reader)?;
+            let module = metadata::ModuleDecoder::new(self.ids.clone()).read(reader)?;
             let _ = self
                 .importable_modules
                 .insert(module.name.join("/"), module)
@@ -162,155 +352,45 @@ where
     fn compile_gleam_package(
         &mut self,
         config: &PackageConfig,
-        src_path: PathBuf,
-        test_path: Option<PathBuf>,
-    ) -> Result<Package, Error> {
-        let out_path = paths::build_package(Mode::Dev, Target::Erlang, &config.name);
+        is_root: bool,
+        root_path: PathBuf,
+    ) -> Result<Vec<Module>, Error> {
+        let out_path = paths::build_package(self.mode(), self.target(), &config.name);
+        let lib_path = paths::build_packages(self.mode(), self.target());
+        let artifact_path = out_path.join("build");
+        let mode = self.mode();
+        let mut compiler = PackageCompiler::new(
+            config,
+            &root_path,
+            &out_path,
+            &lib_path,
+            self.target(),
+            self.ids.clone(),
+            self.io.clone(),
+            if (is_root) {
+                Some(&mut self.build_journal)
+            } else {
+                None
+            },
+        );
+        compiler.write_metadata = true;
+        compiler.write_entrypoint = is_root;
+        compiler.compile_beam_bytecode = !is_root || self.options.perform_codegen;
+        compiler.silence_subprocess_stdout = self.silence_subprocess_stdout;
+        compiler.read_source_files(mode)?;
 
-        let options = package_compiler::Options {
-            target: Target::Erlang,
-            src_path: src_path.clone(),
-            out_path: out_path.clone(),
-            test_path: test_path.clone(),
-            name: config.name.to_string(),
-            write_metadata: true,
-        };
-
-        let mut compiler = options.into_compiler(self.io.clone())?;
-
-        // Compile project to Erlang source code
+        // Compile project to Erlang or JavaScript source code
         let compiled = compiler.compile(
             &mut self.warnings,
             &mut self.importable_modules,
             &mut self.defined_modules,
         )?;
 
-        // Write an Erlang .app file
-        ErlangApp::new(&out_path.join("ebin")).render(
-            self.io.clone(),
-            config,
-            &compiled.modules,
-        )?;
-
-        let mut modules: Vec<_> = compiled
-            .modules
-            .iter()
-            .map(Module::compiled_erlang_path)
-            .collect();
-
-        // If we're the dev package render the entrypoint module used by the
-        // `gleam run` and `gleam test` commands
-        // TODO: Pass this config in in a better way rather than attaching extra
-        // meaning to this flag.
-        if test_path.is_some() {
-            let name = "gleam@@main.erl";
-            self.io
-                .writer(&out_path.join(name))?
-                .write(std::include_bytes!("../../templates/gleam@@main.erl"))?;
-            modules.push(PathBuf::from(name));
-        }
-
-        // Copy across any Erlang files from src and test
-        self.copy_project_erlang_files(src_path, &mut modules, &out_path, test_path)?;
-
-        // Compile Erlang to .beam files
-        self.compile_erlang_to_beam(&out_path, &modules)?;
-
         Ok(compiled)
     }
-
-    fn copy_project_erlang_files(
-        &mut self,
-        src_path: PathBuf,
-        modules: &mut Vec<PathBuf>,
-        out_path: &PathBuf,
-        test_path: Option<PathBuf>,
-    ) -> Result<(), Error> {
-        tracing::info!("copying_erlang_source_files");
-        let mut copied = HashSet::new();
-        self.copy_erlang_files(&src_path, &mut copied, modules, out_path)?;
-        Ok(if let Some(test_path) = test_path {
-            self.copy_erlang_files(&test_path, &mut copied, modules, out_path)?;
-        })
-    }
-
-    fn compile_erlang_to_beam(&self, out_path: &Path, modules: &[PathBuf]) -> Result<(), Error> {
-        tracing::info!("compiling_erlang");
-
-        let erl_libs = paths::build_packages_erl_libs_glob(Mode::Dev, Target::Erlang);
-        let env = [
-            ("ERL_LIBS", erl_libs.to_string_lossy().to_string()),
-            ("TERM", "dumb".into()),
-        ];
-        let mut args = vec![
-            "-o".into(),
-            out_path.join("ebin").to_string_lossy().to_string(),
-        ];
-        for module in modules {
-            args.push(out_path.join(module).to_string_lossy().to_string());
-        }
-        let status = self.io.exec("erlc", &args, &env, None)?;
-
-        if status.success() {
-            Ok(())
-        } else {
-            Err(Error::ShellCommand {
-                command: "erlc".to_string(),
-                err: None,
-            })
-        }
-    }
-
-    fn copy_erlang_files(
-        &self,
-        src_path: &Path,
-        copied: &mut HashSet<PathBuf>,
-        to_compile_modules: &mut Vec<PathBuf>,
-        out_path: &Path,
-    ) -> Result<()> {
-        for entry in self.io.read_dir(src_path)? {
-            let full_path = entry.expect("copy_erlang_files dir_entry").path();
-
-            let extension = full_path
-                .extension()
-                .unwrap_or_default()
-                .to_str()
-                .unwrap_or_default();
-
-            // Copy any Erlang modules or header files
-            if extension == "erl" || extension == "hrl" {
-                let relative_path = full_path
-                    .strip_prefix(src_path)
-                    .expect("copy_erlang_files strip prefix")
-                    .to_path_buf();
-                let destination = out_path.join(&relative_path);
-
-                // TODO: test
-                if !copied.insert(relative_path.clone()) {
-                    return Err(Error::DuplicateErlangFile {
-                        file: relative_path.to_string_lossy().to_string(),
-                    });
-                }
-
-                self.io.copy(&full_path, &destination)?;
-
-                // Track the new module to compile
-                if extension == "erl" {
-                    to_compile_modules.push(relative_path);
-                }
-            }
-        }
-        Ok(())
-    }
 }
 
-#[derive(Debug, PartialEq, Clone, Copy)]
-enum SourceLocations {
-    Src,
-    SrcAndTest,
-}
-
-fn order_packages(packages: &HashMap<String, &ManifestPackage>) -> Result<Vec<String>, Error> {
+fn order_packages(packages: &HashMap<String, ManifestPackage>) -> Result<Vec<String>, Error> {
     dep_tree::toposort_deps(
         packages
             .values()
@@ -346,4 +426,10 @@ fn usable_build_tool(package: &ManifestPackage) -> Result<BuildTool, Error> {
         package: package.name.to_string(),
         build_tools: package.build_tools.clone(),
     })
+}
+
+pub struct CheckpointState {
+    importable_modules: im::HashMap<String, type_::Module>,
+    defined_modules: im::HashMap<String, PathBuf>,
+    ids: UniqueIdGenerator,
 }

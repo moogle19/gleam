@@ -1,9 +1,10 @@
 ---
 source: compiler-core/src/javascript/tests/strings.rs
+assertion_line: 16
 expression: "\nfn go(x) {\n  let \"Hello\" = x\n}\n"
 
 ---
-import { throwError } from "../gleam.js";
+import { throwError } from "../gleam.mjs";
 
 function go(x) {
   if (x !== "Hello") {
@@ -12,7 +13,7 @@ function go(x) {
       "my/mod",
       3,
       "go",
-      "Assignment pattern did not much",
+      "Assignment pattern did not match",
       { value: x }
     );
   }

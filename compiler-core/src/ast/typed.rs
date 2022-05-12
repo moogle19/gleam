@@ -1,5 +1,5 @@
 use super::*;
-use crate::type_::{HasType, Type};
+use crate::type_::{bool, HasType, Type};
 
 use lazy_static::lazy_static;
 
@@ -24,6 +24,16 @@ pub enum TypedExpr {
     },
 
     Sequence {
+        location: SrcSpan,
+        expressions: Vec<Self>,
+    },
+
+    /// A chain of pipe expressions.
+    /// By this point the type checker has expanded it into a series of
+    /// assignments and function calls, but we still have a Pipeline AST node as
+    /// even though it is identical to `Sequence` we want to use different
+    /// locations when showing it in error messages, etc.
+    Pipeline {
         location: SrcSpan,
         expressions: Vec<Self>,
     },
@@ -100,7 +110,7 @@ pub enum TypedExpr {
         location: SrcSpan,
         typ: Arc<Type>,
         label: String,
-        module_name: Vec<String>,
+        module_name: String,
         module_alias: String,
         constructor: ModuleValueConstructor,
     },
@@ -136,9 +146,97 @@ pub enum TypedExpr {
         spread: Box<Self>,
         args: Vec<TypedRecordUpdateArg>,
     },
+
+    Negate {
+        location: SrcSpan,
+        value: Box<Self>,
+    },
 }
 
 impl TypedExpr {
+    // This could be optimised in places to exit early if the first of a series
+    // of expressions is after the byte index.
+    pub fn find_node(&self, byte_index: usize) -> Option<&Self> {
+        if !self.location().contains(byte_index) {
+            return None;
+        }
+
+        match self {
+            Self::Var { .. }
+            | Self::Int { .. }
+            | Self::Todo { .. }
+            | Self::Float { .. }
+            | Self::String { .. }
+            | Self::ModuleSelect { .. } => Some(self),
+
+            Self::Pipeline { expressions, .. } | Self::Sequence { expressions, .. } => {
+                expressions.iter().find_map(|e| e.find_node(byte_index))
+            }
+
+            Self::Tuple {
+                elems: expressions, ..
+            }
+            | Self::List {
+                elements: expressions,
+                ..
+            } => expressions
+                .iter()
+                .find_map(|e| e.find_node(byte_index))
+                .or(Some(self)),
+
+            Self::Negate { value, .. } => value.find_node(byte_index).or(Some(self)),
+
+            Self::Fn { body, .. } => body.find_node(byte_index).or(Some(self)),
+
+            Self::Call { fun, args, .. } => args
+                .iter()
+                .find_map(|arg| arg.find_node(byte_index))
+                .or_else(|| fun.find_node(byte_index))
+                .or(Some(self)),
+
+            Self::BinOp { left, right, .. } => left
+                .find_node(byte_index)
+                .or_else(|| right.find_node(byte_index)),
+
+            Self::Assignment { value, .. } => value.find_node(byte_index),
+
+            Self::Try { value, then, .. } => value
+                .find_node(byte_index)
+                .or_else(|| then.find_node(byte_index))
+                .or(Some(self)),
+
+            Self::Case {
+                subjects, clauses, ..
+            } => subjects
+                .iter()
+                .find_map(|subject| subject.find_node(byte_index))
+                .or_else(|| {
+                    clauses
+                        .iter()
+                        .find_map(|clause| clause.find_node(byte_index))
+                })
+                .or(Some(self)),
+
+            Self::RecordAccess {
+                record: expression, ..
+            }
+            | Self::TupleIndex {
+                tuple: expression, ..
+            } => expression.find_node(byte_index).or(Some(self)),
+
+            Self::BitString { segments, .. } => segments
+                .iter()
+                .find_map(|arg| arg.find_node(byte_index))
+                .or(Some(self)),
+
+            Self::RecordUpdate { spread, args, .. } => args
+                .iter()
+                .find_map(|arg| arg.find_node(byte_index))
+                .or_else(|| spread.find_node(byte_index))
+                .or(Some(self)),
+        }
+    }
+
     pub fn non_zero_compile_time_number(&self) -> bool {
         use regex::Regex;
         lazy_static! {
@@ -153,8 +251,8 @@ impl TypedExpr {
 
     pub fn location(&self) -> SrcSpan {
         match self {
-            Self::Try { then, .. } => then.location(),
             Self::Fn { location, .. }
+            | Self::Try { location, .. }
             | Self::Int { location, .. }
             | Self::Var { location, .. }
             | Self::Todo { location, .. }
@@ -165,7 +263,9 @@ impl TypedExpr {
             | Self::BinOp { location, .. }
             | Self::Tuple { location, .. }
             | Self::String { location, .. }
+            | Self::Negate { location, .. }
             | Self::Sequence { location, .. }
+            | Self::Pipeline { location, .. }
             | Self::BitString { location, .. }
             | Self::Assignment { location, .. }
             | Self::TupleIndex { location, .. }
@@ -175,40 +275,107 @@ impl TypedExpr {
         }
     }
 
+    pub fn type_defining_location(&self) -> SrcSpan {
+        match self {
+            Self::Fn { location, .. }
+            | Self::Int { location, .. }
+            | Self::Try { location, .. }
+            | Self::Var { location, .. }
+            | Self::Todo { location, .. }
+            | Self::Case { location, .. }
+            | Self::Call { location, .. }
+            | Self::List { location, .. }
+            | Self::Float { location, .. }
+            | Self::BinOp { location, .. }
+            | Self::Tuple { location, .. }
+            | Self::String { location, .. }
+            | Self::Negate { location, .. }
+            | Self::Pipeline { location, .. }
+            | Self::BitString { location, .. }
+            | Self::Assignment { location, .. }
+            | Self::TupleIndex { location, .. }
+            | Self::ModuleSelect { location, .. }
+            | Self::RecordAccess { location, .. }
+            | Self::RecordUpdate { location, .. } => *location,
+
+            Self::Sequence {
+                expressions,
+                location,
+                ..
+            } => expressions
+                .last()
+                .map(TypedExpr::location)
+                .unwrap_or(*location),
+        }
+    }
+
     /// Returns `true` if the typed expr is [`Assignment`].
     pub fn is_assignment(&self) -> bool {
         matches!(self, Self::Assignment { .. })
     }
-}
 
-impl HasLocation for TypedExpr {
-    fn location(&self) -> SrcSpan {
-        self.location()
+    pub fn definition_location(&self) -> Option<DefinitionLocation<'_>> {
+        match self {
+            TypedExpr::Fn { .. }
+            | TypedExpr::Int { .. }
+            | TypedExpr::Try { .. }
+            | TypedExpr::List { .. }
+            | TypedExpr::Call { .. }
+            | TypedExpr::Case { .. }
+            | TypedExpr::Todo { .. }
+            | TypedExpr::BinOp { .. }
+            | TypedExpr::Float { .. }
+            | TypedExpr::Tuple { .. }
+            | TypedExpr::Negate { .. }
+            | TypedExpr::String { .. }
+            | TypedExpr::Sequence { .. }
+            | TypedExpr::Pipeline { .. }
+            | TypedExpr::BitString { .. }
+            | TypedExpr::Assignment { .. }
+            | TypedExpr::TupleIndex { .. }
+            | TypedExpr::RecordAccess { .. } => None,
+
+            // TODO: test
+            // TODO: definition
+            TypedExpr::RecordUpdate { .. } => None,
+
+            // TODO: test
+            TypedExpr::ModuleSelect {
+                module_name,
+                constructor,
+                ..
+            } => Some(DefinitionLocation {
+                module: Some(module_name.as_str()),
+                span: constructor.location(),
+            }),
+
+            // TODO: test
+            TypedExpr::Var { constructor, .. } => Some(constructor.definition_location()),
+        }
     }
-}
 
-impl TypedExpr {
     fn type_(&self) -> Arc<Type> {
         match self {
+            Self::Negate { .. } => bool(),
             Self::Var { constructor, .. } => constructor.type_.clone(),
             Self::Try { then, .. } => then.type_(),
-            Self::Fn { typ, .. } => typ.clone(),
-            Self::Int { typ, .. } => typ.clone(),
-            Self::Todo { typ, .. } => typ.clone(),
-            Self::Case { typ, .. } => typ.clone(),
-            Self::List { typ, .. } => typ.clone(),
-            Self::Call { typ, .. } => typ.clone(),
-            Self::Float { typ, .. } => typ.clone(),
-            Self::BinOp { typ, .. } => typ.clone(),
-            Self::Tuple { typ, .. } => typ.clone(),
-            Self::String { typ, .. } => typ.clone(),
-            Self::TupleIndex { typ, .. } => typ.clone(),
-            Self::Assignment { typ, .. } => typ.clone(),
-            Self::ModuleSelect { typ, .. } => typ.clone(),
-            Self::RecordAccess { typ, .. } => typ.clone(),
-            Self::BitString { typ, .. } => typ.clone(),
-            Self::RecordUpdate { typ, .. } => typ.clone(),
-            Self::Sequence { expressions, .. } => expressions
+            Self::Fn { typ, .. }
+            | Self::Int { typ, .. }
+            | Self::Todo { typ, .. }
+            | Self::Case { typ, .. }
+            | Self::List { typ, .. }
+            | Self::Call { typ, .. }
+            | Self::Float { typ, .. }
+            | Self::BinOp { typ, .. }
+            | Self::Tuple { typ, .. }
+            | Self::String { typ, .. }
+            | Self::BitString { typ, .. }
+            | Self::TupleIndex { typ, .. }
+            | Self::Assignment { typ, .. }
+            | Self::ModuleSelect { typ, .. }
+            | Self::RecordAccess { typ, .. }
+            | Self::RecordUpdate { typ, .. } => typ.clone(),
+            Self::Pipeline { expressions, .. } | Self::Sequence { expressions, .. } => expressions
                 .last()
                 .map(TypedExpr::type_)
                 .unwrap_or_else(type_::nil),
@@ -225,6 +392,12 @@ impl TypedExpr {
                 | Self::String { .. }
                 | Self::BitString { .. }
         )
+    }
+}
+
+impl HasLocation for TypedExpr {
+    fn location(&self) -> SrcSpan {
+        self.location()
     }
 }
 

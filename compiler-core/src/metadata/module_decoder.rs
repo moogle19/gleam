@@ -4,7 +4,7 @@ use itertools::Itertools;
 
 use crate::{
     ast::{
-        BitStringSegment, BitStringSegmentOption, CallArg, Constant, TypedConstant,
+        BitStringSegment, BitStringSegmentOption, CallArg, Constant, SrcSpan, TypedConstant,
         TypedConstantBitStringSegment, TypedConstantBitStringSegmentOption,
     },
     build::Origin,
@@ -13,6 +13,7 @@ use crate::{
         self, AccessorsMap, FieldMap, Module, RecordAccessor, Type, TypeConstructor,
         ValueConstructor, ValueConstructorVariant,
     },
+    uid::UniqueIdGenerator,
     Result,
 };
 use std::{collections::HashMap, io::BufRead, sync::Arc};
@@ -42,15 +43,18 @@ macro_rules! read_hashmap {
     }};
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct ModuleDecoder {
-    next_type_var_id: usize,
-    type_var_id_map: HashMap<usize, usize>,
+    ids: UniqueIdGenerator,
+    type_var_id_map: HashMap<u64, u64>,
 }
 
 impl ModuleDecoder {
-    pub fn new() -> Self {
-        Default::default()
+    pub fn new(ids: UniqueIdGenerator) -> Self {
+        Self {
+            ids,
+            type_var_id_map: Default::default(),
+        }
     }
 
     pub fn read(&mut self, reader: impl BufRead) -> Result<Module> {
@@ -63,6 +67,11 @@ impl ModuleDecoder {
             package: reader.get_package()?.to_string(),
             origin: Origin::Src,
             types: read_hashmap!(reader.get_types()?, self, type_constructor),
+            types_constructors: read_hashmap!(
+                reader.get_types_constructors()?,
+                self,
+                constructors_list
+            ),
             values: read_hashmap!(reader.get_values()?, self, value_constructor),
             accessors: read_hashmap!(reader.get_accessors()?, self, accessors_map),
         })
@@ -117,17 +126,21 @@ impl ModuleDecoder {
     }
 
     fn type_var(&mut self, reader: &schema::type_::var::Reader<'_>) -> Result<Arc<Type>> {
-        let serialized_id = reader.get_id() as usize;
+        let serialized_id = reader.get_id();
         let id = match self.type_var_id_map.get(&serialized_id) {
             Some(&id) => id,
             None => {
-                let new_id = self.next_type_var_id;
-                self.next_type_var_id += 1;
+                let new_id = self.ids.next();
                 let _ = self.type_var_id_map.insert(serialized_id, new_id);
                 new_id
             }
         };
         Ok(type_::generic_var(id))
+    }
+
+    fn constructors_list(&mut self, reader: &capnp::text_list::Reader<'_>) -> Result<Vec<String>> {
+        let vec = reader.iter().map_ok(String::from).try_collect()?;
+        Ok(vec)
     }
 
     fn value_constructor(
@@ -138,7 +151,6 @@ impl ModuleDecoder {
         let variant = self.value_constructor_variant(&reader.get_variant()?)?;
         Ok(ValueConstructor {
             public: true,
-            origin: Default::default(),
             type_,
             variant,
         })
@@ -314,7 +326,7 @@ impl ModuleDecoder {
     ) -> Result<ValueConstructorVariant> {
         use value_constructor_variant::Which;
         match reader.which()? {
-            Which::ModuleConstant(reader) => self.module_constant_variant(&reader?),
+            Which::ModuleConstant(reader) => self.module_constant_variant(&reader),
             Which::ModuleFn(reader) => self.module_fn_variant(&reader),
             Which::Record(reader) => self.record(&reader),
         }
@@ -322,10 +334,19 @@ impl ModuleDecoder {
 
     fn module_constant_variant(
         &mut self,
-        reader: &constant::Reader<'_>,
+        reader: &value_constructor_variant::module_constant::Reader<'_>,
     ) -> Result<ValueConstructorVariant> {
         Ok(ValueConstructorVariant::ModuleConstant {
-            literal: self.constant(reader)?,
+            location: self.src_span(&reader.get_location()?)?,
+            literal: self.constant(&reader.get_literal()?)?,
+            module: reader.get_module()?.to_string(),
+        })
+    }
+
+    fn src_span(&self, reader: &src_span::Reader<'_>) -> Result<SrcSpan> {
+        Ok(SrcSpan {
+            start: reader.get_start() as usize,
+            end: reader.get_end() as usize,
         })
     }
 
@@ -338,6 +359,7 @@ impl ModuleDecoder {
             module: module_name(&reader.get_module()?)?,
             arity: reader.get_arity() as usize,
             field_map: self.field_map(&reader.get_field_map()?)?,
+            location: self.src_span(&reader.get_location()?)?,
         })
     }
 
@@ -347,8 +369,10 @@ impl ModuleDecoder {
     ) -> Result<ValueConstructorVariant> {
         Ok(ValueConstructorVariant::Record {
             name: reader.get_name()?.to_string(),
+            module: reader.get_module()?.to_string(),
             arity: reader.get_arity() as usize,
             field_map: self.field_map(&reader.get_field_map()?)?,
+            location: self.src_span(&reader.get_location()?)?,
         })
     }
 

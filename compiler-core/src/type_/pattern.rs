@@ -8,8 +8,8 @@ use super::*;
 use crate::ast::UntypedPatternBitStringSegment;
 use std::sync::Arc;
 
-pub struct PatternTyper<'a, 'b, 'c> {
-    environment: &'a mut Environment<'b, 'c>,
+pub struct PatternTyper<'a, 'b> {
+    environment: &'a mut Environment<'b>,
     hydrator: &'a Hydrator,
     mode: PatternMode,
     initial_pattern_vars: HashSet<String>,
@@ -20,8 +20,8 @@ enum PatternMode {
     Alternative(Vec<String>),
 }
 
-impl<'a, 'b, 'c> PatternTyper<'a, 'b, 'c> {
-    pub fn new(environment: &'a mut Environment<'b, 'c>, hydrator: &'a Hydrator) -> Self {
+impl<'a, 'b> PatternTyper<'a, 'b> {
+    pub fn new(environment: &'a mut Environment<'b>, hydrator: &'a Hydrator) -> Self {
         Self {
             environment,
             hydrator,
@@ -55,9 +55,8 @@ impl<'a, 'b, 'c> PatternTyper<'a, 'b, 'c> {
                 // after the pattern.
                 self.environment.insert_variable(
                     name.to_string(),
-                    ValueConstructorVariant::LocalVariable,
+                    ValueConstructorVariant::LocalVariable { location },
                     typ,
-                    location,
                 );
                 Ok(())
             }
@@ -313,6 +312,7 @@ impl<'a, 'b, 'c> PatternTyper<'a, 'b, 'c> {
                     expected: type_.clone(),
                     situation: None,
                     location,
+                    rigid_type_names: hashmap![],
                 }),
             },
 
@@ -360,6 +360,7 @@ impl<'a, 'b, 'c> PatternTyper<'a, 'b, 'c> {
                         expected: type_,
                         situation: None,
                         location,
+                        rigid_type_names: hashmap![],
                     })
                 }
             },
@@ -418,7 +419,7 @@ impl<'a, 'b, 'c> PatternTyper<'a, 'b, 'c> {
                             let index_of_first_labelled_arg = pattern_args
                                 .iter()
                                 .position(|a| a.label.is_some())
-                                .unwrap_or_else(|| pattern_args.len());
+                                .unwrap_or(pattern_args.len());
 
                             while pattern_args.len() < field_map.arity {
                                 let new_call_arg = CallArg {
@@ -449,7 +450,7 @@ impl<'a, 'b, 'c> PatternTyper<'a, 'b, 'c> {
                             field_map: cons.field_map().cloned(),
                         }
                     }
-                    ValueConstructorVariant::LocalVariable
+                    ValueConstructorVariant::LocalVariable { .. }
                     | ValueConstructorVariant::ModuleConstant { .. }
                     | ValueConstructorVariant::ModuleFn { .. } => {
                         panic!("Unexpected value constructor type for a constructor pattern.",)

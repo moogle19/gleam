@@ -1,9 +1,10 @@
 ---
 source: compiler-core/src/javascript/tests/externals.rs
-expression: "pub external fn class() -> Nil = \"./the/module.js\" \"one\"\n"
+assertion_line: 53
+expression: "pub external fn class() -> Nil = \"./the/module.mjs\" \"one\"\n"
 
 ---
-import { one as class$ } from "./the/module.js";
+import { one as class$ } from "./the/module.mjs";
 
 export { class$ };
 

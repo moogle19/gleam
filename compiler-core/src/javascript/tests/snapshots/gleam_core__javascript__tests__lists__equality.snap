@@ -1,9 +1,10 @@
 ---
 source: compiler-core/src/javascript/tests/lists.rs
+assertion_line: 67
 expression: "\nfn go() {\n  [] == [1]\n  [] != [1]\n}\n"
 
 ---
-import { toList, isEqual } from "../gleam.js";
+import { toList, isEqual } from "../gleam.mjs";
 
 function go() {
   isEqual(toList([]), toList([1]));

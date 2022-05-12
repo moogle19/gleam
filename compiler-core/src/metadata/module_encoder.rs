@@ -1,6 +1,7 @@
 use crate::{
     ast::{
-        Constant, TypedConstant, TypedConstantBitStringSegment, TypedConstantBitStringSegmentOption,
+        Constant, SrcSpan, TypedConstant, TypedConstantBitStringSegment,
+        TypedConstantBitStringSegmentOption,
     },
     io::Writer,
     schema_capnp::{self as schema, *},
@@ -14,8 +15,8 @@ use std::{collections::HashMap, ops::Deref, sync::Arc};
 #[derive(Debug)]
 pub struct ModuleEncoder<'a> {
     data: &'a type_::Module,
-    next_type_var_id: u16,
-    type_var_id_map: HashMap<usize, u16>,
+    next_type_var_id: u64,
+    type_var_id_map: HashMap<u64, u64>,
 }
 
 impl<'a> ModuleEncoder<'a> {
@@ -39,6 +40,7 @@ impl<'a> ModuleEncoder<'a> {
         self.set_module_values(&mut module);
         self.set_module_accessors(&mut module);
         module.set_package(&self.data.package);
+        self.set_module_types_constructors(&mut module);
 
         let result = capnp::serialize_packed::write_message(&mut writer, &message);
         result.map_err(|e| writer.convert_err(e))
@@ -103,6 +105,21 @@ impl<'a> ModuleEncoder<'a> {
         }
     }
 
+    fn set_module_types_constructors(&mut self, module: &mut module::Builder<'_>) {
+        tracing::trace!("Writing module metadata types to constructors mapping");
+        let mut types_constructors = module
+            .reborrow()
+            .init_types_constructors(self.data.types_constructors.len() as u32);
+        for (i, (name, constructors)) in self.data.types_constructors.iter().enumerate() {
+            let mut property = types_constructors.reborrow().get(i as u32);
+            property.set_key(name);
+            self.build_types_constructors_mapping(
+                property.initn_value(constructors.len() as u32),
+                constructors,
+            )
+        }
+    }
+
     fn set_module_values(&mut self, module: &mut module::Builder<'_>) {
         tracing::trace!("Writing module metadata values");
         let mut values = module.reborrow().init_values(self.data.values.len() as u32);
@@ -132,6 +149,16 @@ impl<'a> ModuleEncoder<'a> {
         );
     }
 
+    fn build_types_constructors_mapping(
+        &mut self,
+        mut builder: capnp::text_list::Builder<'_>,
+        constructors: &[String],
+    ) {
+        for (i, s) in constructors.iter().enumerate() {
+            builder.set(i as u32, s);
+        }
+    }
+
     fn build_value_constructor(
         &mut self,
         mut builder: value_constructor::Builder<'_>,
@@ -141,29 +168,45 @@ impl<'a> ModuleEncoder<'a> {
         self.build_value_constructor_variant(builder.init_variant(), &constructor.variant);
     }
 
+    fn build_src_span(&mut self, mut builder: src_span::Builder<'_>, span: SrcSpan) {
+        builder.set_start(span.start as u16);
+        builder.set_end(span.end as u16);
+    }
+
     fn build_value_constructor_variant(
         &mut self,
         builder: value_constructor_variant::Builder<'_>,
         constructor: &ValueConstructorVariant,
     ) {
         match constructor {
-            ValueConstructorVariant::LocalVariable => {
+            ValueConstructorVariant::LocalVariable { .. } => {
                 panic!("Unexpected local variable value constructor in module interface",)
             }
 
-            ValueConstructorVariant::ModuleConstant { literal } => {
-                self.build_constant(builder.init_module_constant(), literal)
+            ValueConstructorVariant::ModuleConstant {
+                literal,
+                location,
+                module,
+            } => {
+                let mut builder = builder.init_module_constant();
+                self.build_src_span(builder.reborrow().init_location(), *location);
+                self.build_constant(builder.reborrow().init_literal(), literal);
+                builder.reborrow().set_module(module);
             }
 
             ValueConstructorVariant::Record {
                 name,
                 field_map,
                 arity,
+                location,
+                module,
             } => {
                 let mut builder = builder.init_record();
                 builder.set_name(name);
+                builder.set_module(module);
                 builder.set_arity(*arity as u16);
-                self.build_optional_field_map(builder.init_field_map(), field_map);
+                self.build_optional_field_map(builder.reborrow().init_field_map(), field_map);
+                self.build_src_span(builder.init_location(), *location);
             }
 
             ValueConstructorVariant::ModuleFn {
@@ -171,17 +214,19 @@ impl<'a> ModuleEncoder<'a> {
                 field_map,
                 module,
                 name,
+                location,
             } => {
                 let mut builder = builder.init_module_fn();
                 builder.set_name(name);
                 self.build_optional_field_map(builder.reborrow().init_field_map(), field_map);
                 {
-                    let mut builder = builder.reborrow().init_module(self.data.name.len() as u32);
+                    let mut builder = builder.reborrow().init_module(module.len() as u32);
                     for (i, s) in module.iter().enumerate() {
                         builder.set(i as u32, s);
                     }
                 }
                 builder.set_arity(*arity as u16);
+                self.build_src_span(builder.init_location(), *location);
             }
         }
     }
@@ -354,7 +399,7 @@ impl<'a> ModuleEncoder<'a> {
         }
     }
 
-    fn build_type_var(&mut self, mut builder: schema::type_::var::Builder<'_>, id: usize) {
+    fn build_type_var(&mut self, mut builder: schema::type_::var::Builder<'_>, id: u64) {
         let serialised_id = match self.type_var_id_map.get(&id) {
             Some(&id) => id,
             None => {

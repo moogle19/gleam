@@ -3,32 +3,38 @@ use crate::ast::{AssignmentKind, UntypedExpr, PIPE_VARIABLE};
 use vec1::Vec1;
 
 #[derive(Debug)]
-pub(crate) struct PipeTyper<'a, 'b, 'c, 'd> {
+pub(crate) struct PipeTyper<'a, 'b, 'c> {
     size: usize,
     argument_type: Arc<Type>,
     argument_location: SrcSpan,
     location: SrcSpan,
     expressions: Vec<TypedExpr>,
-    expr_typer: &'a mut ExprTyper<'b, 'c, 'd>,
+    expr_typer: &'a mut ExprTyper<'b, 'c>,
 }
 
-impl<'a, 'b, 'c, 'd> PipeTyper<'a, 'b, 'c, 'd> {
+impl<'a, 'b, 'c> PipeTyper<'a, 'b, 'c> {
     pub fn infer(
-        expr_typer: &'a mut ExprTyper<'b, 'c, 'd>,
+        expr_typer: &'a mut ExprTyper<'b, 'c>,
         expressions: Vec1<UntypedExpr>,
     ) -> Result<TypedExpr, Error> {
         let size = expressions.len();
-        let mut expressions = expressions.into_iter();
-        let first = expr_typer.infer(
+        let end = &expressions[..]
+            .last()
             // The vec is non-empty, this indexing can never fail
-            expressions.next().expect("Empty pipeline in typer"),
-        )?;
+            .expect("Empty pipeline in typer")
+            .location()
+            .end;
+        let mut expressions = expressions.into_iter();
+        let first = expr_typer.infer(expressions.next().expect("Empty pipeline in typer"))?;
         let mut typer = Self {
             size,
             expr_typer,
             argument_type: first.type_(),
             argument_location: first.location(),
-            location: first.location(),
+            location: SrcSpan {
+                start: first.location().start,
+                end: *end,
+            },
             expressions: Vec::with_capacity(size),
         };
         // No need to update self.argument_* as we set it above
@@ -53,7 +59,7 @@ impl<'a, 'b, 'c, 'd> PipeTyper<'a, 'b, 'c, 'd> {
         // Return any errors after clean-up
         result?;
 
-        Ok(TypedExpr::Sequence {
+        Ok(TypedExpr::Pipeline {
             expressions: self.expressions,
             location: self.location,
         })
@@ -124,9 +130,10 @@ impl<'a, 'b, 'c, 'd> PipeTyper<'a, 'b, 'c, 'd> {
             name: PIPE_VARIABLE.to_string(),
             constructor: ValueConstructor {
                 public: true,
-                origin: self.argument_location,
                 type_: self.argument_type.clone(),
-                variant: ValueConstructorVariant::LocalVariable,
+                variant: ValueConstructorVariant::LocalVariable {
+                    location: self.argument_location,
+                },
             },
         }
     }
@@ -152,9 +159,8 @@ impl<'a, 'b, 'c, 'd> PipeTyper<'a, 'b, 'c, 'd> {
         // Insert the variable for use in type checking the rest of the pipeline
         self.expr_typer.environment.insert_variable(
             PIPE_VARIABLE.to_string(),
-            ValueConstructorVariant::LocalVariable,
+            ValueConstructorVariant::LocalVariable { location },
             expression.type_(),
-            location,
         );
         // Add the assignment to the AST
         let assignment = TypedExpr::Assignment {
@@ -239,8 +245,13 @@ impl<'a, 'b, 'c, 'd> PipeTyper<'a, 'b, 'c, 'd> {
                 fn_(vec![self.argument_type.clone()], return_type.clone()),
             )
             .map_err(|e| {
-                convert_unify_error(e, function.location())
-                    .with_unify_error_situation(UnifyErrorSituation::PipeTypeMismatch)
+                let is_pipe_mismatch = self.check_if_pipe_type_mismatch(&e);
+                let error = convert_unify_error(e, function.location());
+                if is_pipe_mismatch {
+                    error.with_unify_error_situation(UnifyErrorSituation::PipeTypeMismatch)
+                } else {
+                    error
+                }
             })?;
 
         Ok(TypedExpr::Call {
@@ -249,5 +260,28 @@ impl<'a, 'b, 'c, 'd> PipeTyper<'a, 'b, 'c, 'd> {
             fun: function,
             args: vec![self.typed_left_hand_value_variable_call_argument()],
         })
+    }
+
+    fn check_if_pipe_type_mismatch(&mut self, error: &UnifyError) -> bool {
+        let types = match error {
+            UnifyError::CouldNotUnify {
+                expected, given, ..
+            } => (expected.as_ref(), given.as_ref()),
+            _ => return false,
+        };
+
+        match types {
+            (Type::Fn { args: a, .. }, Type::Fn { args: b, .. }) if a.len() == b.len() => {
+                match (a.get(0), b.get(0)) {
+                    (Some(a), Some(b)) => self
+                        .expr_typer
+                        .environment
+                        .unify(a.clone(), b.clone())
+                        .is_err(),
+                    _ => false,
+                }
+            }
+            _ => false,
+        }
     }
 }

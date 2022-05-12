@@ -1,4 +1,4 @@
-use crate::build::Origin;
+use crate::{ast::SrcSpan, build::Origin, uid::UniqueIdGenerator};
 
 use super::{Module, Type, TypeConstructor, TypeVar, ValueConstructor, ValueConstructorVariant};
 use std::{cell::RefCell, collections::HashMap, sync::Arc};
@@ -92,13 +92,13 @@ pub fn utf_codepoint() -> Arc<Type> {
     })
 }
 
-pub fn generic_var(id: usize) -> Arc<Type> {
+pub fn generic_var(id: u64) -> Arc<Type> {
     Arc::new(Type::Var {
         type_: Arc::new(RefCell::new(TypeVar::Generic { id })),
     })
 }
 
-pub fn unbound_var(id: usize) -> Arc<Type> {
+pub fn unbound_var(id: u64) -> Arc<Type> {
     Arc::new(Type::Var {
         type_: Arc::new(RefCell::new(TypeVar::Unbound { id })),
     })
@@ -111,16 +111,9 @@ pub fn link(type_: Arc<Type>) -> Arc<Type> {
     })
 }
 
-pub fn build_prelude(uid: &mut usize) -> Module {
-    let mut new_generic_var = || {
-        let t = generic_var(*uid);
-        *uid += 1;
-        t
-    };
-
+pub fn build_prelude(ids: &UniqueIdGenerator) -> Module {
     let value = |variant, type_| ValueConstructor {
         public: true,
-        origin: Default::default(),
         variant,
         type_,
     };
@@ -130,6 +123,7 @@ pub fn build_prelude(uid: &mut usize) -> Module {
         package: "".to_string(),
         origin: Origin::Src,
         types: HashMap::new(),
+        types_constructors: HashMap::new(),
         values: HashMap::new(),
         accessors: HashMap::new(),
     };
@@ -145,13 +139,20 @@ pub fn build_prelude(uid: &mut usize) -> Module {
         },
     );
 
+    let _ = prelude.types_constructors.insert(
+        "Bool".to_string(),
+        vec!["True".to_string(), "False".to_string()],
+    );
+
     let _ = prelude.values.insert(
         "True".to_string(),
         value(
             ValueConstructorVariant::Record {
+                module: "".into(),
                 name: "True".to_string(),
                 field_map: None,
                 arity: 0,
+                location: SrcSpan::default(),
             },
             bool(),
         ),
@@ -160,9 +161,11 @@ pub fn build_prelude(uid: &mut usize) -> Module {
         "False".to_string(),
         value(
             ValueConstructorVariant::Record {
+                module: "".into(),
                 name: "False".to_string(),
                 field_map: None,
                 arity: 0,
+                location: SrcSpan::default(),
             },
             bool(),
         ),
@@ -178,7 +181,7 @@ pub fn build_prelude(uid: &mut usize) -> Module {
         },
     );
 
-    let list_parameter = new_generic_var();
+    let list_parameter = generic_var(ids.next());
     let _ = prelude.types.insert(
         "List".to_string(),
         TypeConstructor {
@@ -212,8 +215,8 @@ pub fn build_prelude(uid: &mut usize) -> Module {
         },
     );
 
-    let result_value = new_generic_var();
-    let result_error = new_generic_var();
+    let result_value = generic_var(ids.next());
+    let result_error = generic_var(ids.next());
     let _ = prelude.types.insert(
         "Result".to_string(),
         TypeConstructor {
@@ -225,13 +228,20 @@ pub fn build_prelude(uid: &mut usize) -> Module {
         },
     );
 
+    let _ = prelude.types_constructors.insert(
+        "Result".to_string(),
+        vec!["Ok".to_string(), "Error".to_string()],
+    );
+
     let _ = prelude.values.insert(
         "Nil".to_string(),
         value(
             ValueConstructorVariant::Record {
+                module: "".into(),
                 name: "Nil".to_string(),
                 arity: 0,
                 field_map: None,
+                location: SrcSpan::default(),
             },
             nil(),
         ),
@@ -269,29 +279,33 @@ pub fn build_prelude(uid: &mut usize) -> Module {
         },
     );
 
-    let ok = new_generic_var();
-    let error = new_generic_var();
+    let ok = generic_var(ids.next());
+    let error = generic_var(ids.next());
     let _ = prelude.values.insert(
         "Ok".to_string(),
         value(
             ValueConstructorVariant::Record {
+                module: "".into(),
                 name: "Ok".to_string(),
                 field_map: None,
                 arity: 1,
+                location: SrcSpan::default(),
             },
             fn_(vec![ok.clone()], result(ok, error)),
         ),
     );
 
-    let ok = new_generic_var();
-    let error = new_generic_var();
+    let ok = generic_var(ids.next());
+    let error = generic_var(ids.next());
     let _ = prelude.values.insert(
         "Error".to_string(),
         value(
             ValueConstructorVariant::Record {
+                module: "".into(),
                 name: "Error".to_string(),
                 field_map: None,
                 arity: 1,
+                location: SrcSpan::default(),
             },
             fn_(vec![error.clone()], result(ok, error)),
         ),

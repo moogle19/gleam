@@ -1,9 +1,10 @@
 ---
 source: compiler-core/src/javascript/tests/todo.rs
+assertion_line: 5
 expression: "\nfn go() {\n    todo\n}\n"
 
 ---
-import { throwError } from "../gleam.js";
+import { throwError } from "../gleam.mjs";
 
 function go() {
   throwError("todo", "my/mod", 3, "go", "This has not yet been implemented", {});

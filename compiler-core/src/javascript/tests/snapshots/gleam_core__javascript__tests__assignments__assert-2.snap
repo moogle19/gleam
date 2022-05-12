@@ -1,9 +1,10 @@
 ---
 source: compiler-core/src/javascript/tests/assignments.rs
+assertion_line: 18
 expression: "fn go(x) { assert #(1, 2) = x }"
 
 ---
-import { throwError } from "../gleam.js";
+import { throwError } from "../gleam.mjs";
 
 function go(x) {
   if (x[0] !== 1 || x[1] !== 2) {
@@ -12,7 +13,7 @@ function go(x) {
       "my/mod",
       1,
       "go",
-      "Assignment pattern did not much",
+      "Assignment pattern did not match",
       { value: x }
     );
   }

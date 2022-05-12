@@ -7,6 +7,10 @@ pub static ASSIGNMENT_VAR: &str = "$";
 enum Index<'a> {
     Int(usize),
     String(&'a str),
+    ByteAt(usize),
+    IntFromSlice(usize, usize),
+    FloatAt(usize),
+    SliceAfter(usize),
 }
 
 #[derive(Debug)]
@@ -21,6 +25,28 @@ pub(crate) struct Generator<'module_ctx, 'expression_gen, 'a> {
     path: Vec<Index<'a>>,
     checks: Vec<Check<'a>>,
     assignments: Vec<Assignment<'a>>,
+}
+
+struct Offset {
+    bytes: usize,
+    open_ended: bool,
+}
+
+impl Offset {
+    pub fn new() -> Self {
+        Self {
+            bytes: 0,
+            open_ended: false,
+        }
+    }
+    // This should never be called on an open ended offset
+    // However previous checks ensure bit_string segements without a size are only allowed at the end of a pattern
+    pub fn increment(&mut self, step: usize) {
+        self.bytes += step
+    }
+    pub fn set_open_ended(&mut self) {
+        self.open_ended = true
+    }
 }
 
 impl<'module_ctx, 'expression_gen, 'a> Generator<'module_ctx, 'expression_gen, 'a> {
@@ -51,6 +77,22 @@ impl<'module_ctx, 'expression_gen, 'a> Generator<'module_ctx, 'expression_gen, '
         self.path.push(Index::Int(i));
     }
 
+    fn push_byte_at(&mut self, i: usize) {
+        self.path.push(Index::ByteAt(i));
+    }
+
+    fn push_int_from_slice(&mut self, start: usize, end: usize) {
+        self.path.push(Index::IntFromSlice(start, end));
+    }
+
+    fn push_float_at(&mut self, i: usize) {
+        self.path.push(Index::FloatAt(i));
+    }
+
+    fn push_rest_from(&mut self, i: usize) {
+        self.path.push(Index::SliceAfter(i));
+    }
+
     fn push_string_times(&mut self, s: &'a str, times: usize) {
         for _ in 0..times {
             self.push_string(s);
@@ -72,6 +114,10 @@ impl<'module_ctx, 'expression_gen, 'a> Generator<'module_ctx, 'expression_gen, '
             Index::Int(i) => Document::String(format!("[{}]", i)),
             // TODO: escape string if needed
             Index::String(s) => docvec!(".", s),
+            Index::ByteAt(i) => docvec!(".byteAt(", i, ")"),
+            Index::IntFromSlice(start, end) => docvec!(".intFromSlice(", start, ", ", end, ")"),
+            Index::FloatAt(i) => docvec!(".floatAt(", i, ")"),
+            Index::SliceAfter(i) => docvec!(".sliceAfter(", i, ")"),
         }))
     }
 
@@ -343,12 +389,70 @@ impl<'module_ctx, 'expression_gen, 'a> Generator<'module_ctx, 'expression_gen, '
                 Ok(())
             }
 
-            Pattern::VarUsage { location, .. } | Pattern::BitString { location, .. } => {
-                Err(Error::Unsupported {
-                    feature: "Bit string matching".to_string(),
-                    location: *location,
-                })
+            Pattern::BitString { segments, .. } => {
+                use BitStringSegmentOption as Opt;
+
+                let mut offset = Offset::new();
+                for segment in segments {
+                    let _ = match segment.options.as_slice() {
+                        [] | [Opt::Int { .. }] => {
+                            self.push_byte_at(offset.bytes);
+                            self.traverse_pattern(subject, &segment.value)?;
+                            self.pop();
+                            offset.increment(1);
+                            Ok(())
+                        }
+
+                        [Opt::Size { value: size, .. }] => match &**size {
+                            Pattern::Int { value, .. } => {
+                                let start = offset.bytes;
+                                let increment = value
+                                    .parse::<usize>()
+                                    .expect("part of an Int node should always parse as integer");
+                                offset.increment(increment / 8);
+                                let end = offset.bytes;
+
+                                self.push_int_from_slice(start, end);
+                                self.traverse_pattern(subject, &segment.value)?;
+                                self.pop();
+                                Ok(())
+                            }
+                            _ => Err(Error::Unsupported {
+                                feature: "This bit string size option in patterns".to_string(),
+                                location: segment.location,
+                            }),
+                        },
+
+                        [Opt::Float { .. }] => {
+                            self.push_float_at(offset.bytes);
+                            self.traverse_pattern(subject, &segment.value)?;
+                            self.pop();
+                            offset.increment(8);
+                            Ok(())
+                        }
+
+                        [Opt::Binary { .. }] => {
+                            self.push_rest_from(offset.bytes);
+                            self.traverse_pattern(subject, &segment.value)?;
+                            self.pop();
+                            offset.set_open_ended();
+                            Ok(())
+                        }
+
+                        _ => Err(Error::Unsupported {
+                            feature: "This bit string segment option in patterns".to_string(),
+                            location: segment.location,
+                        }),
+                    }?;
+                }
+
+                self.push_bitstring_length_check(subject.clone(), offset.bytes, offset.open_ended);
+                Ok(())
             }
+            Pattern::VarUsage { location, .. } => Err(Error::Unsupported {
+                feature: "Bit string matching".to_string(),
+                location: *location,
+            }),
         }
     }
 
@@ -408,6 +512,20 @@ impl<'module_ctx, 'expression_gen, 'a> Generator<'module_ctx, 'expression_gen, '
             path: self.path_document(),
         })
     }
+
+    fn push_bitstring_length_check(
+        &mut self,
+        subject: Document<'a>,
+        expected_bytes: usize,
+        has_tail_spread: bool,
+    ) {
+        self.checks.push(Check::BitStringLength {
+            expected_bytes,
+            has_tail_spread,
+            subject,
+            path: self.path_document(),
+        })
+    }
 }
 
 #[derive(Debug)]
@@ -461,6 +579,12 @@ pub enum Check<'a> {
         subject: Document<'a>,
         path: Document<'a>,
         expected_length: usize,
+        has_tail_spread: bool,
+    },
+    BitStringLength {
+        subject: Document<'a>,
+        path: Document<'a>,
+        expected_bytes: usize,
         has_tail_spread: bool,
     },
     Booly {
@@ -540,6 +664,23 @@ impl<'a> Check<'a> {
                     docvec![subject, path, length_check,]
                 } else {
                     docvec!["!", subject, path, length_check,]
+                }
+            }
+            Check::BitStringLength {
+                subject,
+                path,
+                expected_bytes,
+                has_tail_spread,
+            } => {
+                let length_check = Document::String(if has_tail_spread {
+                    format!(".length >= {}", expected_bytes)
+                } else {
+                    format!(".length == {}", expected_bytes)
+                });
+                if match_desired {
+                    docvec![subject, path, length_check,]
+                } else {
+                    docvec!["!(", subject, path, length_check, ")",]
                 }
             }
         }

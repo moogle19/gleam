@@ -14,12 +14,16 @@ use std::{fmt::Debug, path::Path};
 /// for each Gleam module in the package.
 #[derive(Debug)]
 pub struct Erlang<'a> {
-    output_directory: &'a Path,
+    build_directory: &'a Path,
+    include_directory: &'a Path,
 }
 
 impl<'a> Erlang<'a> {
-    pub fn new(output_directory: &'a Path) -> Self {
-        Self { output_directory }
+    pub fn new(build_directory: &'a Path, include_directory: &'a Path) -> Self {
+        Self {
+            build_directory,
+            include_directory,
+        }
     }
 
     pub fn render<Writer: FileSystemWriter>(
@@ -28,7 +32,7 @@ impl<'a> Erlang<'a> {
         modules: &[Module],
     ) -> Result<()> {
         for module in modules {
-            let erl_name = module.name.replace("/", "@");
+            let erl_name = module.name.replace('/', "@");
             self.erlang_module(&writer, module, &erl_name)?;
             self.erlang_record_headers(&writer, module, &erl_name)?;
         }
@@ -42,7 +46,7 @@ impl<'a> Erlang<'a> {
         erl_name: &str,
     ) -> Result<()> {
         let name = format!("{}.erl", erl_name);
-        let path = self.output_directory.join(&name);
+        let path = self.build_directory.join(&name);
         let mut file = writer.writer(&path)?;
         let line_numbers = LineNumbers::new(&module.code);
         let res = erlang::module(&module.ast, &line_numbers, &mut file);
@@ -60,7 +64,7 @@ impl<'a> Erlang<'a> {
             let name = format!("{}_{}.hrl", erl_name, name);
             tracing::debug!(name = ?name, "Generated Erlang header");
             writer
-                .writer(&self.output_directory.join(name))?
+                .writer(&self.include_directory.join(name))?
                 .write(text.as_bytes())?;
         }
         Ok(())
@@ -94,12 +98,12 @@ impl<'a> ErlangApp<'a> {
             .erlang
             .application_start_module
             .as_ref()
-            .map(|module| tuple("mod", &format!("'{}'", module.replace("/", "@"))))
+            .map(|module| tuple("mod", &format!("'{}'", module.replace('/', "@"))))
             .unwrap_or_default();
 
         let modules = modules
             .iter()
-            .map(|m| m.name.replace("/", "@"))
+            .map(|m| m.name.replace('/', "@"))
             .sorted()
             .join(",\n               ");
 
@@ -156,7 +160,7 @@ impl<'a> JavaScript<'a> {
     fn write_prelude(&self, writer: &impl FileSystemWriter) -> Result<()> {
         tracing::debug!("Generated js prelude");
         writer
-            .writer(&self.output_directory.join("gleam.js"))?
+            .writer(&self.output_directory.join("gleam.mjs"))?
             .str_write(javascript::PRELUDE)?;
         Ok(())
     }
@@ -167,7 +171,7 @@ impl<'a> JavaScript<'a> {
         module: &Module,
         js_name: &str,
     ) -> Result<()> {
-        let name = format!("{}.js", js_name);
+        let name = format!("{}.mjs", js_name);
         let path = self.output_directory.join(&name);
         let mut file = writer.writer(&path)?;
         let line_numbers = LineNumbers::new(&module.code);

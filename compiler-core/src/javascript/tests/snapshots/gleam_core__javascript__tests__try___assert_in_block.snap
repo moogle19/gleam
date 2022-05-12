@@ -1,9 +1,10 @@
 ---
 source: compiler-core/src/javascript/tests/try_.rs
+assertion_line: 63
 expression: "pub fn main(x) {\n  assert Ok(y) = {\n    try z = x\n    Ok(z + 1)\n  }\n  y\n}"
 
 ---
-import { Ok, throwError } from "../gleam.js";
+import { Ok, throwError } from "../gleam.mjs";
 
 export function main(x) {
   let $ = (() => {
@@ -18,7 +19,7 @@ export function main(x) {
       "my/mod",
       2,
       "main",
-      "Assignment pattern did not much",
+      "Assignment pattern did not match",
       { value: $ }
     );
   }

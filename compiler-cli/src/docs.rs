@@ -2,7 +2,7 @@ use std::time::Instant;
 
 use crate::{cli, hex::ApiKeyCommand, http::HttpClient};
 use gleam_core::{
-    build::Package,
+    build::{Mode, Options, Package},
     config::{DocsPage, PackageConfig},
     error::Error,
     hex,
@@ -10,42 +10,53 @@ use gleam_core::{
     paths, Result,
 };
 
-static TOKEN_NAME: &str = concat!(env!("CARGO_PKG_NAME"), " (", env!("CARGO_PKG_VERSION"), ")");
+pub fn remove(package: String, version: String) -> Result<()> {
+    RemoveCommand::new(package, version).run()
+}
 
-pub fn remove(package: String, version: String) -> Result<(), Error> {
-    let config = hexpm::Config::new();
-    let http = HttpClient::new();
+struct RemoveCommand {
+    package: String,
+    version: String,
+}
 
-    // Start event loop so we can run async functions to call the Hex API
-    let runtime = tokio::runtime::Runtime::new().expect("Unable to start Tokio async runtime");
+impl RemoveCommand {
+    pub fn new(package: String, version: String) -> Self {
+        Self { package, version }
+    }
+}
 
-    // Get login creds from user
-    let username = cli::ask("https://hex.pm username")?;
-    let password = cli::ask_password("https://hex.pm password")?;
+impl ApiKeyCommand for RemoveCommand {
+    fn with_api_key(
+        &mut self,
+        handle: &tokio::runtime::Handle,
+        hex_config: &hexpm::Config,
+        api_key: &str,
+    ) -> Result<()> {
+        let http = HttpClient::new();
 
-    // Authenticate with API
-    let request = hexpm::create_api_key_request(&username, &password, TOKEN_NAME, &config);
-    let response = runtime.block_on(http.send(request))?;
-    let token = hexpm::create_api_key_response(response).map_err(Error::hex)?;
+        // Remove docs from API
+        let request = hexpm::remove_docs_request(&self.package, &self.version, api_key, hex_config)
+            .map_err(Error::hex)?;
+        let response = handle.block_on(http.send(request))?;
+        hexpm::remove_docs_response(response).map_err(Error::hex)?;
 
-    // Remove docs from API
-    let request =
-        hexpm::remove_docs_request(&package, &version, &token, &config).map_err(Error::hex)?;
-    let response = runtime.block_on(http.send(request))?;
-    hexpm::remove_docs_response(response).map_err(Error::hex)?;
-
-    // Done!
-    println!(
-        "The docs for {} {} have been removed from HexDocs",
-        package, version
-    );
-    Ok(())
+        // Done!
+        println!(
+            "The docs for {} {} have been removed from HexDocs",
+            self.package, self.version
+        );
+        Ok(())
+    }
 }
 
 pub fn build() -> Result<()> {
     let config = crate::config::root_config()?;
     let out = paths::build_docs(&config.name);
-    let mut compiled = crate::build::main()?;
+    let mut compiled = crate::build::main(Options {
+        mode: Mode::Prod,
+        target: None,
+        perform_codegen: true,
+    })?;
     let outputs = build_documentation(&config, &mut compiled)?;
 
     // Write
@@ -78,22 +89,26 @@ pub(crate) fn build_documentation(
     Ok(outputs)
 }
 
-pub struct PublishCommand {
+struct PublishCommand {
     config: PackageConfig,
     archive: Vec<u8>,
+}
+
+pub fn publish() -> Result<()> {
+    PublishCommand::new()?.run()
 }
 
 impl PublishCommand {
     pub fn new() -> Result<Self> {
         let config = crate::config::root_config()?;
-        let mut compiled = crate::build::main()?;
+        let mut compiled = crate::build::main(Options {
+            perform_codegen: true,
+            mode: Mode::Dev,
+            target: None,
+        })?;
         let outputs = build_documentation(&config, &mut compiled)?;
         let archive = crate::fs::create_tar_archive(outputs)?;
         Ok(Self { config, archive })
-    }
-
-    pub fn publish() -> Result<()> {
-        Self::new()?.run()
     }
 }
 

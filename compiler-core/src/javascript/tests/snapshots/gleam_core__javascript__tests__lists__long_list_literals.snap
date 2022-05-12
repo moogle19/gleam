@@ -1,9 +1,10 @@
 ---
 source: compiler-core/src/javascript/tests/lists.rs
+assertion_line: 19
 expression: "\nfn go() {\n  [111111111111111111111111111111111111111111111111111111111111111111111111]\n  [11111111111111111111111111111111111111111111, 1111111111111111111111111111111111111111111]\n}\n"
 
 ---
-import { toList } from "../gleam.js";
+import { toList } from "../gleam.mjs";
 
 function go() {
   toList([

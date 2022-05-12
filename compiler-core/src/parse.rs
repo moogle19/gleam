@@ -152,7 +152,10 @@ where
             // there are still more tokens
             let expected = vec!["An import, const, type, if block, or function.".to_string()];
             return parse_error(
-                ParseErrorType::UnexpectedToken { expected },
+                ParseErrorType::UnexpectedToken {
+                    expected,
+                    hint: None,
+                },
                 SrcSpan { start, end },
             );
         }
@@ -378,6 +381,7 @@ where
                     value,
                 }
             }
+
             // var lower_name and UpName
             Some((start, Token::Name { name } | Token::UpName { name }, end)) => {
                 let _ = self.next_tok();
@@ -386,6 +390,7 @@ where
                     name,
                 }
             }
+
             Some((start, Token::Todo, mut end)) => {
                 let _ = self.next_tok();
                 let mut label = None;
@@ -400,6 +405,7 @@ where
                     label,
                 }
             }
+
             Some((start, Token::Hash, _)) => {
                 let _ = self.next_tok();
                 let _ = self.expect_one(&Token::LeftParen)?;
@@ -534,6 +540,27 @@ where
             Some((start, Token::LeftParen, _)) => {
                 return parse_error(ParseErrorType::ExprLparStart, SrcSpan { start, end: start });
             }
+
+            // Boolean negation
+            Some((start, Token::Bang, _end)) => {
+                let _ = self.next_tok();
+                match self.parse_expression_unit()? {
+                    Some(value) => UntypedExpr::Negate {
+                        location: SrcSpan {
+                            start,
+                            end: value.location().end,
+                        },
+                        value: Box::from(value),
+                    },
+                    None => {
+                        return parse_error(
+                            ParseErrorType::ExpectedExpr,
+                            SrcSpan { start, end: start },
+                        )
+                    }
+                }
+            }
+
             t0 => {
                 self.tok0 = t0;
                 return Ok(None);
@@ -549,7 +576,7 @@ where
                     // tuple access
                     Some((_, Token::Int { value }, end)) => {
                         let _ = self.next_tok();
-                        let v = value.replace("_", "");
+                        let v = value.replace('_', "");
                         if let Ok(index) = u64::from_str(&v) {
                             expr = UntypedExpr::TupleIndex {
                                 location: SrcSpan { start, end },
@@ -593,12 +620,13 @@ where
                 let start = expr.location().start;
                 if let Some((dot_s, _)) = self.maybe_one(&Token::DotDot) {
                     // Record update
-                    let (_, name, name_e) = self.expect_name()?;
+                    let base = self.expect_expression()?;
+                    let base_e = base.location().end;
                     let spread = RecordUpdateSpread {
-                        name,
+                        base: Box::new(base),
                         location: SrcSpan {
                             start: dot_s,
-                            end: name_e,
+                            end: base_e,
                         },
                     };
                     let mut args = vec![];
@@ -702,18 +730,15 @@ where
             let value = self.parse_expression()?;
             let then = self.parse_expression_seq()?;
             match (value, then) {
-                (Some(value), Some((then, seq_end))) => Ok(Some((
+                (Some(value), Some((then, end))) => Ok(Some((
                     UntypedExpr::Try {
-                        location: SrcSpan {
-                            start,
-                            end: value.location().end,
-                        },
+                        location: SrcSpan { start, end },
                         value: Box::new(value),
                         pattern,
                         annotation,
                         then: Box::new(then),
                     },
-                    seq_end,
+                    end,
                 ))),
 
                 (None, _) => parse_error(
@@ -763,9 +788,17 @@ where
                 if self.maybe_one(&Token::Dot).is_some() {
                     self.expect_constructor_pattern(Some((start, name, end)))?
                 } else {
-                    Pattern::Var {
-                        location: SrcSpan { start, end },
-                        name,
+                    match name.as_str() {
+                        "true" | "false" => {
+                            return parse_error(
+                                ParseErrorType::LowcaseBooleanPattern,
+                                SrcSpan { start, end },
+                            )
+                        }
+                        _ => Pattern::Var {
+                            location: SrcSpan { start, end },
+                            name,
+                        },
                     }
                 }
             }
@@ -912,7 +945,14 @@ where
                 alternative_patterns.push(self.parse_patterns()?);
             }
             let guard = self.parse_case_clause_guard(false)?;
-            let (arr_s, arr_e) = self.expect_one(&Token::RArrow)?;
+            let (arr_s, arr_e) = self.expect_one(&Token::RArrow).map_err(|mut e| {
+                if let ParseErrorType::UnexpectedToken { ref mut hint, .. } = e.error {
+                    *hint = Some(
+                        "Did you mean to wrap a multi line clause in curly braces?".to_string(),
+                    );
+                }
+                e
+            })?;
             let then = self.parse_expression()?;
             if let Some(then) = then {
                 Ok(Some(Clause {
@@ -1015,7 +1055,7 @@ where
                 if let Some((dot_s, _)) = self.maybe_one(&Token::Dot) {
                     match self.next_tok() {
                         Some((_, Token::Int { value }, int_e)) => {
-                            let v = value.replace("_", "");
+                            let v = value.replace('_', "");
                             if let Ok(index) = u64::from_str(&v) {
                                 Ok(Some(ClauseGuard::TupleIndex {
                                     location: SrcSpan {
@@ -1219,7 +1259,7 @@ where
             Ok(Some(Statement::Fn {
                 doc: None,
                 location: SrcSpan { start, end },
-                end_location: rbr_e - 1,
+                end_position: rbr_e - 1,
                 public,
                 name,
                 arguments: args,
@@ -1465,8 +1505,8 @@ where
     // examples:
     //   type A { A }
     //   type A { A(String) }
-    //   type A(a) { A(a: b) }
-    //   type A(a) { A(String, a: b) }
+    //   type Box(inner_type) { Box(inner: inner_type) }
+    //   type NamedBox(inner_type) { Box(String, inner: inner_type) }
     fn parse_custom_type(
         &mut self,
         start: usize,
@@ -2160,7 +2200,7 @@ where
                             if let Some((int_s, Token::Int { value, .. }, int_e)) = self.next_tok()
                             {
                                 let (_, end) = self.expect_one(&Token::RightParen)?;
-                                let v = value.replace("_", "");
+                                let v = value.replace('_', "");
                                 match u8::from_str(&v) {
                                     Ok(units) if units > 0 => {
                                         Ok(Some(BitStringSegmentOption::Unit {
@@ -2416,7 +2456,10 @@ where
             None => parse_error(ParseErrorType::UnexpectedEof, SrcSpan { start: 0, end: 0 }),
 
             Some((start, _, end)) => parse_error(
-                ParseErrorType::UnexpectedToken { expected },
+                ParseErrorType::UnexpectedToken {
+                    expected,
+                    hint: None,
+                },
                 SrcSpan { start, end },
             ),
         }

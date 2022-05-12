@@ -12,21 +12,23 @@ mod tests;
 
 pub use environment::*;
 pub use error::{Error, UnifyErrorSituation, Warning};
+pub(crate) use expression::ExprTyper;
 pub use fields::FieldMap;
 pub use prelude::*;
 
 use crate::{
     ast::{
-        self, ArgNames, BitStringSegment, BitStringSegmentOption, CallArg, Constant, Layer,
-        Pattern, RecordConstructor, RecordConstructorArg, SrcSpan, Statement, TypeAst,
-        TypedConstant, TypedExpr, TypedModule, TypedPattern, TypedPatternBitStringSegment,
-        TypedRecordUpdateArg, TypedStatement, UnqualifiedImport, UntypedModule,
-        UntypedMultiPattern, UntypedPattern, UntypedRecordUpdateArg, UntypedStatement,
+        self, ArgNames, BitStringSegment, BitStringSegmentOption, CallArg, Constant,
+        DefinitionLocation, Layer, Pattern, RecordConstructor, RecordConstructorArg, SrcSpan,
+        Statement, TypeAst, TypedConstant, TypedExpr, TypedModule, TypedPattern,
+        TypedPatternBitStringSegment, TypedRecordUpdateArg, TypedStatement, UnqualifiedImport,
+        UntypedModule, UntypedMultiPattern, UntypedPattern, UntypedRecordUpdateArg,
+        UntypedStatement,
     },
     bit_string,
     build::{Origin, Target},
+    uid::UniqueIdGenerator,
 };
-use expression::*;
 
 use std::{
     cell::RefCell,
@@ -45,6 +47,14 @@ pub trait HasType {
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Type {
+    /// A nominal (named) type such as `Int`, `Float`, or a programmer defined
+    /// custom type such as `Person`. The type can take other types as
+    /// arguments (aka "generics" or "parametric polymorphism").
+    ///
+    /// If the type is defined in the Gleam prelude the `module` field will be
+    /// empty, otherwise it will contain the name of the module that
+    /// defines the type.
+    ///
     App {
         public: bool,
         module: Vec<String>,
@@ -52,18 +62,22 @@ pub enum Type {
         args: Vec<Arc<Type>>,
     },
 
+    /// The type of a function. It takes arguments and returns a value.
+    ///
     Fn {
         args: Vec<Arc<Type>>,
         retrn: Arc<Type>,
     },
 
-    Var {
-        type_: Arc<RefCell<TypeVar>>,
-    },
+    /// A type variable. See the contained `TypeVar` enum for more information.
+    ///
+    Var { type_: Arc<RefCell<TypeVar>> },
 
-    Tuple {
-        elems: Vec<Arc<Type>>,
-    },
+    /// A tuple is an ordered collection of 0 or more values, each of which
+    /// can have a different type, so the `tuple` type is the sum of all the
+    /// contained types.
+    ///
+    Tuple { elems: Vec<Arc<Type>> },
 }
 
 impl Type {
@@ -147,7 +161,7 @@ impl Type {
         module: &[String],
         name: &str,
         arity: usize,
-        environment: &mut Environment<'_, '_>,
+        environment: &mut Environment<'_>,
     ) -> Option<Vec<Arc<Self>>> {
         match self {
             Self::App {
@@ -250,10 +264,12 @@ pub struct RecordAccessor {
 #[derive(Debug, Clone, PartialEq)]
 pub enum ValueConstructorVariant {
     /// A locally defined variable or function parameter
-    LocalVariable,
+    LocalVariable { location: SrcSpan },
 
     /// A module constant
     ModuleConstant {
+        location: SrcSpan,
+        module: String,
         literal: Constant<Arc<Type>, String>,
     },
 
@@ -263,6 +279,7 @@ pub enum ValueConstructorVariant {
         field_map: Option<FieldMap>,
         module: Vec<String>,
         arity: usize,
+        location: SrcSpan,
     },
 
     /// A constructor for a custom type
@@ -270,6 +287,8 @@ pub enum ValueConstructorVariant {
         name: String,
         arity: usize,
         field_map: Option<FieldMap>,
+        location: SrcSpan,
+        module: String,
     },
 }
 
@@ -280,24 +299,44 @@ impl ValueConstructorVariant {
                 name,
                 arity,
                 field_map,
+                location,
+                ..
             } => ModuleValueConstructor::Record {
                 name: name.clone(),
                 field_map: field_map.clone(),
                 arity: *arity,
                 type_,
+                location: *location,
             },
 
-            Self::ModuleConstant { literal } => ModuleValueConstructor::Constant {
+            // TODO: remove this clone with an rc clone
+            Self::ModuleConstant {
+                literal, location, ..
+            } => ModuleValueConstructor::Constant {
                 literal: literal.clone(),
+                location: *location,
             },
 
-            Self::LocalVariable { .. } | Self::ModuleFn { .. } => ModuleValueConstructor::Fn,
+            Self::LocalVariable { location, .. } | Self::ModuleFn { location, .. } => {
+                ModuleValueConstructor::Fn {
+                    location: *location,
+                }
+            }
+        }
+    }
+
+    pub fn definition_location(&self) -> SrcSpan {
+        match self {
+            ValueConstructorVariant::LocalVariable { location }
+            | ValueConstructorVariant::ModuleConstant { location, .. }
+            | ValueConstructorVariant::ModuleFn { location, .. }
+            | ValueConstructorVariant::Record { location, .. } => *location,
         }
     }
 
     /// Returns `true` if the variant is [`LocalVariable`].
     pub fn is_local_variable(&self) -> bool {
-        matches!(self, Self::LocalVariable)
+        matches!(self, Self::LocalVariable { .. })
     }
 }
 
@@ -308,11 +347,27 @@ pub enum ModuleValueConstructor {
         arity: usize,
         type_: Arc<Type>,
         field_map: Option<FieldMap>,
+        location: SrcSpan,
     },
-    Fn,
+
+    Fn {
+        location: SrcSpan,
+    },
+
     Constant {
         literal: TypedConstant,
+        location: SrcSpan,
     },
+}
+
+impl ModuleValueConstructor {
+    pub fn location(&self) -> SrcSpan {
+        match self {
+            ModuleValueConstructor::Fn { location }
+            | ModuleValueConstructor::Record { location, .. }
+            | ModuleValueConstructor::Constant { location, .. } => *location,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -321,6 +376,7 @@ pub struct Module {
     pub origin: Origin,
     pub package: String,
     pub types: HashMap<String, TypeConstructor>,
+    pub types_constructors: HashMap<String, Vec<String>>,
     pub values: HashMap<String, ValueConstructor>,
     pub accessors: HashMap<String, AccessorsMap>,
 }
@@ -335,9 +391,30 @@ pub enum PatternConstructor {
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum TypeVar {
-    Unbound { id: usize },
+    /// Unbound is an unbound variable. It is one specific type but we don't
+    /// know what yet in the inference process. It has a unique id which can be used to
+    /// identify if two unbound variable Rust values are the same Gleam type variable
+    /// instance or not.
+    ///
+    ///
+    Unbound { id: u64 },
+    /// Link is type variable where it was an unbound variable but we worked out
+    /// that it is some other type and now we point to that one.
+    ///
     Link { type_: Arc<Type> },
-    Generic { id: usize },
+    /// A Generic variable stands in for any possible type and cannot be
+    /// specialised to any one type
+    ///
+    /// # Example
+    ///
+    /// ```gleam
+    /// type Cat(a) {
+    ///   Cat(name: a)
+    /// }
+    /// // a is TypeVar::Generic
+    /// ```
+    ///
+    Generic { id: u64 },
 }
 
 impl TypeVar {
@@ -393,7 +470,6 @@ pub struct TypeConstructor {
 #[derive(Debug, Clone, PartialEq)]
 pub struct ValueConstructor {
     pub public: bool,
-    pub origin: SrcSpan,
     pub variant: ValueConstructorVariant,
     pub type_: Arc<Type>,
 }
@@ -401,6 +477,26 @@ pub struct ValueConstructor {
 impl ValueConstructor {
     pub fn is_local_variable(&self) -> bool {
         self.variant.is_local_variable()
+    }
+
+    pub fn definition_location(&self) -> DefinitionLocation<'_> {
+        match &self.variant {
+            ValueConstructorVariant::Record {
+                module, location, ..
+            }
+            | ValueConstructorVariant::ModuleConstant {
+                location, module, ..
+            } => DefinitionLocation {
+                module: Some(module.as_str()),
+                span: *location,
+            },
+
+            ValueConstructorVariant::ModuleFn { location, .. }
+            | ValueConstructorVariant::LocalVariable { location } => DefinitionLocation {
+                module: None,
+                span: *location,
+            },
+        }
     }
 }
 
@@ -428,16 +524,16 @@ impl ValueConstructor {
 ///
 pub fn infer_module(
     target: Target,
-    uid: &mut usize,
+    ids: &UniqueIdGenerator,
     mut module: UntypedModule,
     origin: Origin,
     package: &str,
-    modules: &HashMap<String, Module>,
+    modules: &im::HashMap<String, Module>,
     warnings: &mut Vec<Warning>,
 ) -> Result<TypedModule, Error> {
     let name = module.name.clone();
     let documentation = std::mem::take(&mut module.documentation);
-    let mut environment = Environment::new(uid, &name, modules, warnings);
+    let mut environment = Environment::new(ids.clone(), &name, modules, warnings);
     validate_module_name(&name)?;
 
     let mut type_names = HashMap::with_capacity(module.statements.len());
@@ -508,7 +604,7 @@ pub fn infer_module(
     for value in environment.module_values.values() {
         if let Some(leaked) = value.type_.find_private_type() {
             return Err(Error::PrivateTypeLeak {
-                location: value.origin,
+                location: value.variant.definition_location(),
                 leaked,
             });
         }
@@ -516,6 +612,7 @@ pub fn infer_module(
 
     let Environment {
         module_types: types,
+        module_types_constructors: types_constructors,
         module_values: values,
         accessors,
         ..
@@ -528,6 +625,7 @@ pub fn infer_module(
         type_info: Module {
             name,
             types,
+            types_constructors,
             values,
             accessors,
             origin,
@@ -603,7 +701,7 @@ fn register_values<'a>(
     module_name: &[String],
     hydrators: &mut HashMap<String, Hydrator>,
     names: &mut HashMap<&'a str, &'a SrcSpan>,
-    environment: &mut Environment<'_, '_>,
+    environment: &mut Environment<'_>,
 ) -> Result<(), Error> {
     match s {
         Statement::Fn {
@@ -635,6 +733,7 @@ fn register_values<'a>(
 
             // Construct type from annotations
             let mut hydrator = Hydrator::new();
+            hydrator.permit_holes(true);
             let arg_types = args
                 .iter()
                 .map(|arg| hydrator.type_from_option_ast(&arg.annotation, environment))
@@ -655,9 +754,9 @@ fn register_values<'a>(
                     field_map,
                     module: module_name.to_vec(),
                     arity: args.len(),
+                    location: *location,
                 },
                 typ,
-                *location,
             );
             if !public {
                 environment.init_usage(name.clone(), EntityKind::PrivateFunction, *location);
@@ -706,12 +805,12 @@ fn register_values<'a>(
                 ValueConstructor {
                     public: *public,
                     type_: typ.clone(),
-                    origin: *location,
                     variant: ValueConstructorVariant::ModuleFn {
                         name: fun.clone(),
                         field_map: field_map.clone(),
                         module: vec![module.clone()],
                         arity: args.len(),
+                        location: *location,
                     },
                 },
             );
@@ -724,9 +823,9 @@ fn register_values<'a>(
                     module: vec![module.clone()],
                     arity: args.len(),
                     field_map,
+                    location: *location,
                 },
                 typ,
-                *location,
             );
             if !public {
                 environment.init_usage(name.clone(), EntityKind::PrivateFunction, *location);
@@ -801,11 +900,12 @@ fn register_values<'a>(
                         ValueConstructor {
                             public: *public,
                             type_: typ.clone(),
-                            origin: constructor.location,
                             variant: ValueConstructorVariant::Record {
                                 name: constructor.name.clone(),
                                 arity: constructor.arguments.len(),
                                 field_map: field_map.clone(),
+                                location: constructor.location,
+                                module: module_name.join("/"),
                             },
                         },
                     );
@@ -825,9 +925,10 @@ fn register_values<'a>(
                         name: constructor.name.clone(),
                         arity: constructor.arguments.len(),
                         field_map,
+                        location: constructor.location,
+                        module: module_name.join("/"),
                     },
                     typ,
-                    constructor.location,
                 );
             }
         }
@@ -845,7 +946,7 @@ fn register_values<'a>(
 fn generalise_statement(
     s: TypedStatement,
     module_name: &[String],
-    environment: &mut Environment<'_, '_>,
+    environment: &mut Environment<'_>,
 ) -> TypedStatement {
     match s {
         Statement::Fn {
@@ -856,7 +957,7 @@ fn generalise_statement(
             arguments: args,
             body,
             return_annotation,
-            end_location,
+            end_position: end_location,
             return_type,
         } => {
             // Lookup the inferred function information
@@ -878,13 +979,13 @@ fn generalise_statement(
                 &name,
                 ValueConstructor {
                     public,
-                    origin: location,
                     type_: typ,
                     variant: ValueConstructorVariant::ModuleFn {
                         name: name.clone(),
                         field_map,
                         module: module_name.to_vec(),
                         arity: args.len(),
+                        location,
                     },
                 },
             );
@@ -895,16 +996,14 @@ fn generalise_statement(
                 name,
                 public,
                 arguments: args,
-                end_location,
+                end_position: end_location,
                 return_annotation,
                 return_type,
                 body,
             }
         }
 
-        statement
-        @
-        (Statement::TypeAlias { .. }
+        statement @ (Statement::TypeAlias { .. }
         | Statement::CustomType { .. }
         | Statement::ExternalFn { .. }
         | Statement::ExternalType { .. }
@@ -917,7 +1016,7 @@ fn infer_statement(
     s: UntypedStatement,
     module_name: &[String],
     hydrators: &mut HashMap<String, Hydrator>,
-    environment: &mut Environment<'_, '_>,
+    environment: &mut Environment<'_>,
 ) -> Result<TypedStatement, Error> {
     match s {
         Statement::Fn {
@@ -928,7 +1027,7 @@ fn infer_statement(
             arguments: args,
             body,
             return_annotation,
-            end_location,
+            end_position: end_location,
             ..
         } => {
             let preregistered_fn = environment
@@ -976,9 +1075,9 @@ fn infer_statement(
                         field_map,
                         module: module_name.to_vec(),
                         arity: args.len(),
+                        location,
                     },
                     typ.clone(),
-                    location,
                 );
                 typ
             } else {
@@ -991,7 +1090,7 @@ fn infer_statement(
                 name,
                 public,
                 arguments: args,
-                end_location,
+                end_position: end_location,
                 return_annotation,
                 return_type: typ
                     .return_type()
@@ -1216,9 +1315,10 @@ fn infer_statement(
                 &name,
                 ValueConstructor {
                     public,
-                    origin: location,
                     variant: ValueConstructorVariant::ModuleConstant {
+                        location,
                         literal: typed_expr.clone(),
+                        module: module_name.join("/"),
                     },
                     type_: type_.clone(),
                 },
@@ -1329,7 +1429,7 @@ fn assert_no_labelled_arguments<A>(args: &[CallArg<A>]) -> Result<(), Error> {
 /// could cause naively-implemented type checking to diverge.
 /// While traversing the type tree.
 ///
-fn unify_unbound_type(typ: Arc<Type>, own_id: usize) -> Result<(), UnifyError> {
+fn unify_unbound_type(typ: Arc<Type>, own_id: u64) -> Result<(), UnifyError> {
     if let Type::Var { type_: typ } = typ.deref() {
         let new_value = match typ.borrow().deref() {
             TypeVar::Link { type_: typ, .. } => return unify_unbound_type(typ.clone(), own_id),
@@ -1380,12 +1480,12 @@ fn unify_unbound_type(typ: Arc<Type>, own_id: usize) -> Result<(), UnifyError> {
 fn match_fun_type(
     typ: Arc<Type>,
     arity: usize,
-    environment: &mut Environment<'_, '_>,
+    environment: &mut Environment<'_>,
 ) -> Result<(Vec<Arc<Type>>, Arc<Type>), MatchFunTypeError> {
     if let Type::Var { type_: typ } = typ.deref() {
         let new_value = match typ.borrow().deref() {
             TypeVar::Link { type_: typ, .. } => {
-                return match_fun_type(typ.clone(), arity, environment)
+                return match_fun_type(typ.clone(), arity, environment);
             }
 
             TypeVar::Unbound { .. } => {
@@ -1468,7 +1568,7 @@ fn make_type_vars(
     args: &[String],
     location: &SrcSpan,
     hydrator: &mut Hydrator,
-    environment: &mut Environment<'_, '_>,
+    environment: &mut Environment<'_>,
 ) -> Result<Vec<Arc<Type>>, Error> {
     args.iter()
         .map(|arg| TypeAst::Var {
@@ -1482,32 +1582,72 @@ fn make_type_vars(
 fn custom_type_accessors<A>(
     constructors: &[RecordConstructor<A>],
     hydrator: &mut Hydrator,
-    environment: &mut Environment<'_, '_>,
+    environment: &mut Environment<'_>,
 ) -> Result<Option<HashMap<String, RecordAccessor>>, Error> {
-    // Get the constructor for this custom type.
-    let args = match constructors {
-        [constructor] if !constructor.arguments.is_empty() => &constructor.arguments,
-        // If there is not exactly 1 constructor we return as we cannot
-        // build any constructors.
-        _ => return Ok(None),
-    };
+    let args = get_compatible_record_fields(constructors);
 
     let mut fields = HashMap::with_capacity(args.len());
     hydrator.disallow_new_type_variables();
-    for (index, RecordConstructorArg { label, ast, .. }) in args.iter().enumerate() {
-        if let Some(label) = label {
-            let typ = hydrator.type_from_ast(ast, environment)?;
-            let _ = fields.insert(
-                label.to_string(),
-                RecordAccessor {
-                    index: index as u64,
-                    label: label.to_string(),
-                    type_: typ,
-                },
-            );
-        }
+    for (index, label, ast) in args {
+        let typ = hydrator.type_from_ast(ast, environment)?;
+        let _ = fields.insert(
+            label.to_string(),
+            RecordAccessor {
+                index: index as u64,
+                label: label.to_string(),
+                type_: typ,
+            },
+        );
     }
     Ok(Some(fields))
+}
+
+/// Returns the fields that have the same label and type across all variants of
+/// the given type.
+fn get_compatible_record_fields<A>(
+    constructors: &[RecordConstructor<A>],
+) -> Vec<(usize, &str, &TypeAst)> {
+    let mut compatible = vec![];
+
+    let first = match constructors.get(0) {
+        Some(first) => first,
+        None => return compatible,
+    };
+
+    'next_argument: for (index, first_argument) in first.arguments.iter().enumerate() {
+        // Fields without labels do not have accessors
+        let label = match first_argument.label.as_ref() {
+            Some(label) => label.as_str(),
+            None => continue 'next_argument,
+        };
+
+        // Check each variant to see if they have an field in the same position
+        // with the same label and the same type
+        for constructor in constructors.iter().skip(1) {
+            // The field must exist in all variants
+            let argument = match constructor.arguments.get(index) {
+                Some(argument) => argument,
+                None => continue 'next_argument,
+            };
+
+            // The labels must be the same
+            if argument.label != first_argument.label {
+                continue 'next_argument;
+            }
+
+            // The types must be the same
+            if !argument.ast.is_logically_equal(&first_argument.ast) {
+                continue 'next_argument;
+            }
+        }
+
+        // The previous loop did not find any incompatible fields in the other
+        // variants so this field is compatible across variants and we should
+        // generate an accessor for it.
+        compatible.push((index, label, &first_argument.ast))
+    }
+
+    compatible
 }
 
 /// Iterate over a module, registering any new types created by the module into the typer
@@ -1516,7 +1656,7 @@ pub fn register_types<'a>(
     module: &[String],
     hydrators: &mut HashMap<String, Hydrator>,
     names: &mut HashMap<&'a str, &'a SrcSpan>,
-    environment: &mut Environment<'_, '_>,
+    environment: &mut Environment<'_>,
 ) -> Result<(), Error> {
     match statement {
         Statement::ExternalType {
@@ -1561,6 +1701,7 @@ pub fn register_types<'a>(
             public,
             parameters,
             location,
+            constructors,
             ..
         } => {
             assert_unique_type_name(names, name, location)?;
@@ -1586,6 +1727,10 @@ pub fn register_types<'a>(
                     typ,
                 },
             )?;
+
+            let constructor_names = constructors.iter().map(|c| c.name.clone()).collect();
+            environment.insert_type_to_constructors(name.clone(), constructor_names);
+
             // Keep track of private types so we can tell if they are later unused
             if !public {
                 let _ = environment.init_usage(name.clone(), EntityKind::PrivateType, *location);
@@ -1639,7 +1784,7 @@ pub fn register_types<'a>(
 
 pub fn register_import(
     s: &UntypedStatement,
-    environment: &mut Environment<'_, '_>,
+    environment: &mut Environment<'_>,
 ) -> Result<(), Error> {
     match s {
         Statement::Import {
@@ -1683,20 +1828,26 @@ pub fn register_import(
                 let imported_name = as_name.as_ref().unwrap_or(name);
 
                 // Check if value already was imported
-                if let Some(value) = environment.local_values.get(imported_name) {
+                if let Some(previous) = environment.imported_names.get(imported_name) {
                     return Err(Error::DuplicateImport {
                         location: *location,
-                        previous_location: value.origin,
+                        previous_location: *previous,
                         name: name.to_string(),
                     });
                 }
+
+                // Register the name as imported so it can't be imported a
+                // second time in future
+                let _ = environment
+                    .imported_names
+                    .insert(imported_name.clone(), *location);
+
                 // Register the unqualified import if it is a value
                 if let Some(value) = module_info.values.get(name) {
                     environment.insert_variable(
                         imported_name.clone(),
                         value.variant.clone(),
                         value.type_.clone(),
-                        *location,
                     );
                     variant = Some(&value.variant);
                     value_imported = true;
@@ -1760,6 +1911,14 @@ pub fn register_import(
                             .collect(),
                     });
                 }
+            }
+
+            if unqualified.is_empty() {
+                // When the module has no unqualified imports, we track its usage
+                // so we can warn if not used by the end of the type checking
+                let _ = environment
+                    .unused_modules
+                    .insert(module_name.clone(), *location);
             }
 
             // Insert imported module into scope

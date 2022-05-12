@@ -1,9 +1,10 @@
 ---
 source: compiler-core/src/javascript/tests/bit_strings.rs
+assertion_line: 71
 expression: "\nfn go(x) {\n  <<x:bit_string, \"Gleam\":utf8>>\n}\n"
 
 ---
-import { toBitString, stringBits } from "../gleam.js";
+import { toBitString, stringBits } from "../gleam.mjs";
 
 function go(x) {
   return toBitString([x.buffer, stringBits("Gleam")]);

@@ -52,6 +52,7 @@ extern crate pretty_assertions;
 
 mod add;
 mod build;
+mod build_lock;
 mod cli;
 mod compile_package;
 mod config;
@@ -61,12 +62,14 @@ mod format;
 mod fs;
 mod hex;
 mod http;
+mod lsp;
 mod new;
 mod panic;
 mod project;
 mod publish;
 mod run;
 mod shell;
+mod telemetry;
 
 use config::root_config;
 pub use gleam_core::{
@@ -75,43 +78,55 @@ pub use gleam_core::{
 };
 
 use gleam_core::{
-    build::{package_compiler, Target},
-    diagnostic::{self, Severity},
-    error::wrap,
+    build::{Mode, Options, Target},
+    diagnostic::{Diagnostic, Level},
     hex::RetirementReason,
     project::Analysed,
 };
 use hex::ApiKeyCommand as _;
 
-use std::{
-    io::Write,
-    path::{Path, PathBuf},
-};
-use structopt::{clap::AppSettings, StructOpt};
+use std::path::{Path, PathBuf};
+
+use clap::{Args, Parser, Subcommand};
 use strum::VariantNames;
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 
-#[derive(StructOpt, Debug)]
-#[structopt(global_settings = &[AppSettings::ColoredHelp, AppSettings::VersionlessSubcommands])]
+#[derive(Parser, Debug)]
+#[clap(version)]
 enum Command {
     /// Build the project
     Build {
         /// Emit compile time warnings as errors
-        #[structopt(long)]
+        #[clap(long)]
         warnings_as_errors: bool,
+
+        /// The platform to target
+        #[clap(long, ignore_case = true)]
+        target: Option<Target>,
     },
 
+    /// Type check the project
+    Check,
+
     /// Publish the project to the Hex package manager
-    Publish,
+    Publish {
+        #[clap(long)]
+        replace: bool,
+        #[clap(short, long)]
+        yes: bool,
+    },
 
     /// Render HTML documentation
+    #[clap(subcommand)]
     Docs(Docs),
 
     /// Work with dependency packages
+    #[clap(subcommand)]
     Deps(Dependencies),
 
     /// Work with the Hex package manager
+    #[clap(subcommand)]
     Hex(Hex),
 
     /// Create a new project
@@ -120,15 +135,15 @@ enum Command {
     /// Format source code
     Format {
         /// Files to format
-        #[structopt(default_value = ".")]
+        #[clap(default_value = ".")]
         files: Vec<String>,
 
         /// Read source from STDIN
-        #[structopt(long)]
+        #[clap(long)]
         stdin: bool,
 
         /// Check if inputs are formatted without changing them
-        #[structopt(long)]
+        #[clap(long)]
         check: bool,
     },
 
@@ -136,96 +151,98 @@ enum Command {
     Shell,
 
     /// Run the project
-    #[structopt(settings = &[AppSettings::TrailingVarArg])]
-    Run { arguments: Vec<String> },
+    #[clap(trailing_var_arg = true)]
+    Run {
+        /// The platform to target
+        #[clap(long, ignore_case = true)]
+        target: Option<Target>,
+
+        arguments: Vec<String>,
+    },
 
     /// Run the project tests
-    #[structopt(settings = &[AppSettings::TrailingVarArg])]
-    Test { arguments: Vec<String> },
+    #[clap(trailing_var_arg = true)]
+    Test {
+        /// The platform to target
+        #[clap(long, ignore_case = true)]
+        target: Option<Target>,
+
+        arguments: Vec<String>,
+    },
 
     /// Compile a single Gleam package
-    #[structopt(setting = AppSettings::Hidden)]
+    #[clap(hide = true)]
     CompilePackage(CompilePackage),
 
     /// Read and print gleam.toml for debugging
-    #[structopt(setting = AppSettings::Hidden)]
+    #[clap(hide = true)]
     PrintConfig,
 
-    /// Add a new project dependency
+    /// Add new project dependencies
     Add {
-        package: String,
+        /// The names of Hex packages to add
+        #[clap(required = true)]
+        packages: Vec<String>,
 
-        /// Add the package as a dev-only dependency
-        #[structopt(long)]
+        /// Add the packages as dev-only dependencies
+        #[clap(long)]
         dev: bool,
     },
+
+    /// Clean build artifacts
+    Clean,
+
+    /// Run the language server, to be used by editors
+    #[clap(name = "lsp", hide = true)]
+    LanguageServer,
 }
 
-#[derive(StructOpt, Debug, Clone)]
-#[structopt(flatten)]
+#[derive(Args, Debug, Clone)]
 pub struct NewOptions {
     /// Location of the project root
     pub project_root: String,
 
     /// Name of the project
-    #[structopt(long)]
+    #[clap(long)]
     pub name: Option<String>,
 
     /// Description of the project
-    #[structopt(long, default_value = "A Gleam project")]
+    #[clap(long, default_value = "A Gleam project")]
     pub description: String,
 
-    #[structopt(
+    #[clap(
         long,
-        possible_values = &new::Template::VARIANTS,
-        case_insensitive = true,
+        possible_values = new::Template::VARIANTS,
+        ignore_case = true,
         default_value = "lib"
     )]
     pub template: new::Template,
 }
 
-#[derive(StructOpt, Debug)]
-#[structopt(flatten)]
+#[derive(Args, Debug)]
 pub struct CompilePackage {
     /// The compilation target for the generated project
-    #[structopt(long, case_insensitive = true, default_value = "erlang")]
+    #[clap(long, ignore_case = true)]
     target: Target,
 
-    /// The name of the package being compiler
-    #[structopt(long = "name")]
-    package_name: String,
+    /// The directory of the Gleam package
+    #[clap(long = "package")]
+    package_directory: PathBuf,
 
-    /// A directory of source Gleam code
-    #[structopt(long = "src")]
-    src_directory: PathBuf,
-
-    /// A directory of test Gleam code
-    #[structopt(long = "test")]
-    test_directory: Option<PathBuf>,
-
-    /// A directory to write compiled code to
-    #[structopt(long = "out")]
+    /// A directory to write compiled package to
+    #[clap(long = "out")]
     output_directory: PathBuf,
 
-    /// A path to a compiled dependency library
-    #[structopt(long = "lib")]
-    libraries: Vec<PathBuf>,
+    /// A directories of precompiled Gleam projects
+    #[clap(long = "lib")]
+    libraries_directory: PathBuf,
+
+    /// Skip Erlang to BEAM bytecode compilation if given
+    #[clap(long = "no-beam")]
+    skip_beam_compilation: bool,
 }
 
-impl CompilePackage {
-    pub fn into_package_compiler_options(self) -> package_compiler::Options {
-        package_compiler::Options {
-            target: self.target,
-            name: self.package_name,
-            src_path: self.src_directory,
-            test_path: self.test_directory,
-            out_path: self.output_directory,
-            write_metadata: true,
-        }
-    }
-}
-
-#[derive(StructOpt, Debug)]
+#[derive(Subcommand, Debug)]
 enum Dependencies {
     /// List all dependency packages
     List,
@@ -234,7 +251,7 @@ enum Dependencies {
     Download,
 }
 
-#[derive(StructOpt, Debug)]
+#[derive(Subcommand, Debug)]
 enum Hex {
     /// Retire a release from Hex
     Retire {
@@ -242,7 +259,7 @@ enum Hex {
 
         version: String,
 
-        #[structopt(possible_values = &RetirementReason::VARIANTS)]
+        #[clap(possible_values = RetirementReason::VARIANTS)]
         reason: RetirementReason,
 
         message: Option<String>,
@@ -252,7 +269,7 @@ enum Hex {
     Unretire { package: String, version: String },
 }
 
-#[derive(StructOpt, Debug)]
+#[derive(Subcommand, Debug)]
 enum Docs {
     /// Render HTML docs locally
     Build,
@@ -263,11 +280,11 @@ enum Docs {
     /// Remove HTML docs from HexDocs
     Remove {
         /// The name of the package
-        #[structopt(long)]
+        #[clap(long)]
         package: String,
 
         /// The version of the docs to remove
-        #[structopt(long)]
+        #[clap(long)]
         version: String,
     },
 }
@@ -277,12 +294,17 @@ fn main() {
     panic::add_handler();
     let stderr = cli::stderr_buffer_writer();
 
-    let result = match Command::from_args() {
-        Command::Build { warnings_as_errors } => command_build(&stderr, warnings_as_errors),
+    let result = match Command::parse() {
+        Command::Build {
+            target,
+            warnings_as_errors,
+        } => command_build(&stderr, target, warnings_as_errors),
+
+        Command::Check => command_check(),
 
         Command::Docs(Docs::Build) => docs::build(),
 
-        Command::Docs(Docs::Publish) => docs::PublishCommand::publish(),
+        Command::Docs(Docs::Publish) => docs::publish(),
 
         Command::Docs(Docs::Remove { package, version }) => docs::remove(package, version),
 
@@ -294,19 +316,21 @@ fn main() {
 
         Command::Deps(Dependencies::List) => dependencies::list(),
 
-        Command::Deps(Dependencies::Download) => dependencies::download(None).map(|_| ()),
+        Command::Deps(Dependencies::Download) => {
+            dependencies::download(cli::Reporter::new(), None).map(|_| ())
+        }
 
         Command::New(options) => new::create(options, VERSION),
 
         Command::Shell => shell::command(),
 
-        Command::Run { arguments } => run::command(&arguments, run::Which::Src),
+        Command::Run { target, arguments } => run::command(arguments, target, run::Which::Src),
 
-        Command::Test { arguments } => run::command(&arguments, run::Which::Test),
+        Command::Test { target, arguments } => run::command(arguments, target, run::Which::Test),
 
         Command::CompilePackage(opts) => compile_package::command(opts),
 
-        Command::Publish => publish::command(),
+        Command::Publish { replace, yes } => publish::command(replace, yes),
 
         Command::PrintConfig => print_config(),
 
@@ -321,7 +345,11 @@ fn main() {
             hex::UnretireCommand::new(package, version).run()
         }
 
-        Command::Add { package, dev } => add::command(package, dev),
+        Command::Add { packages, dev } => add::command(packages, dev),
+
+        Command::Clean => clean(),
+
+        Command::LanguageServer => lsp::main(),
     };
 
     match result {
@@ -338,35 +366,48 @@ fn main() {
     }
 }
 
-const REBAR_DEPRECATION_NOTICE: &str = "The built-in rebar3 support is deprecated and will \
-be removed in a future version of Gleam.
+const REBAR_DEPRECATION_NOTICE: &str =
+    "The built-in rebar3 support is deprecated and will be removed in a
+future version of Gleam.
 
-Please switch to the new Gleam build tool or update your project to use the new `gleam \
-compile-package` API with your existing build tool.
+Please switch to the new Gleam build tool or update your project to
+use the new `gleam compile-package` API with your existing build tool.";
 
-";
+fn command_check() -> Result<(), Error> {
+    let _ = build::main(Options {
+        perform_codegen: false,
+        mode: Mode::Dev,
+        target: None,
+    })?;
+    Ok(())
+}
 
-fn command_build(stderr: &termcolor::BufferWriter, warnings_as_errors: bool) -> Result<(), Error> {
+fn command_build(
+    stderr: &termcolor::BufferWriter,
+    target: Option<Target>,
+    warnings_as_errors: bool,
+) -> Result<(), Error> {
     let mut buffer = stderr.buffer();
     let root = Path::new("./");
 
-    // Use new build tool if not in a rebar or mix project
-    if !root.join("rebar.config").exists() && !root.join("mix.exs").exists() {
-        return build::main().map(|_| ());
+    // Use new build tool if not in a rebar project
+    if !root.join("rebar.config").exists() {
+        return build::main(Options {
+            perform_codegen: true,
+            mode: Mode::Dev,
+            target,
+        })
+        .map(|_| ());
     }
 
-    diagnostic::write_title(
-        &mut buffer,
-        "Deprecated rebar3 build command",
-        Severity::Warning,
-    );
-    buffer
-        .write_all(wrap(REBAR_DEPRECATION_NOTICE).as_bytes())
-        .expect("rebar deprecation message");
-    buffer.flush().expect("flush");
-    stderr
-        .print(&buffer)
-        .expect("command_build_rebar_deprecated_write");
+    Diagnostic {
+        title: "Deprecated rebar3 build command".into(),
+        text: REBAR_DEPRECATION_NOTICE.into(),
+        hint: None,
+        level: Level::Warning,
+        location: None,
+    }
+    .write(&mut buffer);
 
     // Read and type check project
     let (_config, analysed) = project::read_and_analyse(&root)?;
@@ -401,10 +442,17 @@ fn print_config() -> Result<()> {
     Ok(())
 }
 
+fn clean() -> Result<()> {
+    fs::delete_dir(&gleam_core::paths::build())
+}
+
 fn initialise_logger() {
+    let enable_colours = std::env::var("GLEAM_LOG_NOCOLOUR").is_err();
     tracing_subscriber::fmt()
+        .with_writer(std::io::stderr)
         .with_env_filter(&std::env::var("GLEAM_LOG").unwrap_or_else(|_| "off".to_string()))
         .with_target(false)
+        .with_ansi(enable_colours)
         .without_time()
         .init();
 }

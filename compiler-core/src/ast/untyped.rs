@@ -115,6 +115,11 @@ pub enum UntypedExpr {
         spread: RecordUpdateSpread,
         arguments: Vec<UntypedRecordUpdateArg>,
     },
+
+    Negate {
+        location: SrcSpan,
+        value: Box<Self>,
+    },
 }
 
 impl UntypedExpr {
@@ -137,7 +142,8 @@ impl UntypedExpr {
             | Self::Assignment { location, .. }
             | Self::TupleIndex { location, .. }
             | Self::FieldAccess { location, .. }
-            | Self::RecordUpdate { location, .. } => *location,
+            | Self::RecordUpdate { location, .. }
+            | Self::Negate { location, .. } => *location,
             Self::Sequence {
                 location,
                 expressions,
@@ -147,10 +153,15 @@ impl UntypedExpr {
     }
 
     pub fn append_in_sequence(self, next: Self) -> Self {
+        // The new location starts with the start of the first
+        // expression and ends with the end of the last one
+        let location = SrcSpan {
+            start: self.location().start,
+            end: next.location().end,
+        };
         match self {
             Self::Sequence {
-                location,
-                mut expressions,
+                mut expressions, ..
             } => {
                 expressions.push(next);
                 Self::Sequence {
@@ -159,7 +170,7 @@ impl UntypedExpr {
                 }
             }
             _ => Self::Sequence {
-                location: next.location(),
+                location,
                 expressions: vec![self, next],
             },
         }

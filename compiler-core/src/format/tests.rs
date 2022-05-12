@@ -4,9 +4,8 @@ use pretty_assertions::assert_eq;
 
 macro_rules! assert_format {
     ($src:expr $(,)?) => {
-        // println!("\n\n\n{}", $src);
         let mut writer = String::new();
-        pretty(&mut writer, $src).unwrap();
+        pretty(&mut writer, $src, std::path::Path::new("<stdin>")).unwrap();
         assert_eq!($src, writer);
     };
 }
@@ -14,7 +13,7 @@ macro_rules! assert_format {
 macro_rules! assert_format_rewrite {
     ($src:expr, $output:expr  $(,)?) => {
         let mut writer = String::new();
-        pretty(&mut writer, $src).unwrap();
+        pretty(&mut writer, $src, std::path::Path::new("<stdin>")).unwrap();
         assert_eq!(writer, $output);
     };
 }
@@ -3269,6 +3268,69 @@ fn try_empty_line() {
   try _ = x
 
   let x = x
+}
+"
+    );
+}
+
+// https://github.com/gleam-lang/gleam/issues/1390
+#[test]
+fn list_spread_pattern() {
+    assert_format!(
+        "pub fn main(x) {
+  case x {
+    [y, ..] -> y
+    _ -> 0
+  }
+}
+"
+    );
+}
+
+// https://github.com/gleam-lang/gleam/issues/1431
+#[test]
+fn first_argument_capture_special_case_list() {
+    assert_format!(
+        r#"pub fn main(x) {
+  wibble(_, [
+    "one argument that is both breakable and long enough to cause it to wrap",
+  ])
+}
+"#
+    );
+}
+
+// https://github.com/gleam-lang/gleam/issues/1431
+#[test]
+fn first_argument_capture_special_case_fn() {
+    assert_format!(
+        r#"pub fn main(x) {
+  wibble(_, fn() {
+    "one argument that is both breakable and long enough to cause it to wrap"
+  })
+}
+"#
+    );
+}
+
+#[test]
+fn negation() {
+    assert_format!(
+        "pub fn negate(x) {
+  !x
+}
+"
+    );
+}
+
+#[test]
+fn negation_block() {
+    assert_format!(
+        "pub fn negate(x) {
+  !{
+    123
+    x
+  }
 }
 "
     );

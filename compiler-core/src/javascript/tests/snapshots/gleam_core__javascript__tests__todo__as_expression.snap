@@ -1,9 +1,10 @@
 ---
 source: compiler-core/src/javascript/tests/todo.rs
+assertion_line: 28
 expression: "\nfn go(f) {\n  let boop = todo(\"I should do this\")\n  f(todo(\"Boom\"))\n};\n"
 
 ---
-import { throwError } from "../gleam.js";
+import { throwError } from "../gleam.mjs";
 
 function go(f) {
   let boop = (() => {

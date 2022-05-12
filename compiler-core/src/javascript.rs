@@ -85,12 +85,20 @@ impl<'a> Generator<'a> {
             self.register_prelude_usage(&mut imports, "toBitString");
         };
 
+        if self.tracker.sized_integer_segment_used {
+            self.register_prelude_usage(&mut imports, "sizedInteger");
+        };
+
         if self.tracker.string_bit_string_segment_used {
             self.register_prelude_usage(&mut imports, "stringBits");
         };
 
         if self.tracker.codepoint_bit_string_segment_used {
             self.register_prelude_usage(&mut imports, "codepointBits");
+        };
+
+        if self.tracker.float_bit_string_segment_used {
+            self.register_prelude_usage(&mut imports, "float64Bits");
         };
 
         // Put it all together
@@ -264,20 +272,21 @@ impl<'a> Generator<'a> {
     fn import_path(&self, package: &'a str, module: &'a [String]) -> String {
         let path = module.join("/");
 
+        // TODO: strip shared prefixed between current module and imported
+        // module to avoid decending and climbing back out again
         if package == self.module.type_info.package || package.is_empty() {
-            // Same package uses relative paths
-            // TODO: strip shared prefixed between current module and imported
-            // module to avoid decending and climbing back out again
+            // Same package
             match self.module.name.len() {
-                1 => format!("./{}.js", path),
+                1 => format!("./{}.mjs", path),
                 _ => {
                     let prefix = "../".repeat(self.module.name.len() - 1);
-                    format!("{}{}.js", prefix, path)
+                    format!("{}{}.mjs", prefix, path)
                 }
             }
         } else {
-            // Different packages uses absolute imports
-            format!("gleam-packages/{}/{}.js", package, path)
+            // Different package
+            let prefix = "../".repeat(self.module.name.len() + 1);
+            format!("{}{}/dist/{}.mjs", prefix, package, path)
         }
     }
 
@@ -524,12 +533,11 @@ fn try_wrap_object<'a>(items: impl IntoIterator<Item = (Document<'a>, Output<'a>
     ])
 }
 
-// https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Lexical_grammar
-// And we add `undefined` to avoid any unintentional overriding which could
-// cause bugs.
-fn is_valid_js_identifier(word: &str) -> bool {
+fn is_usable_js_identifier(word: &str) -> bool {
     !matches!(
         word,
+        // Keywords and reserved works
+        // https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Lexical_grammar
         "await"
             | "arguments"
             | "break"
@@ -573,17 +581,23 @@ fn is_valid_js_identifier(word: &str) -> bool {
             | "true"
             | "try"
             | "typeof"
-            | "undefined"
             | "var"
             | "void"
             | "while"
             | "with"
             | "yield"
+            // `undefined` to avoid any unintentional overriding.
+            | "undefined"
+            // `then` to avoid a module that defines a `then` function being
+            // used as a `thenable` in JavaScript when the module is imported
+            // dynamically, which results in unexpected behaviour.
+            // It is rather unfortunate that we have to do this.
+            | "then"
     )
 }
 
 fn maybe_escape_identifier_string(word: &str) -> String {
-    if is_valid_js_identifier(word) {
+    if is_usable_js_identifier(word) {
         word.to_string()
     } else {
         escape_identifier(word)
@@ -595,7 +609,7 @@ fn escape_identifier(word: &str) -> String {
 }
 
 fn maybe_escape_identifier_doc(word: &str) -> Document<'_> {
-    if is_valid_js_identifier(word) {
+    if is_usable_js_identifier(word) {
         word.to_doc()
     } else {
         Document::String(escape_identifier(word))
@@ -613,6 +627,8 @@ pub(crate) struct UsageTracker {
     pub float_division_used: bool,
     pub object_equality_used: bool,
     pub bit_string_literal_used: bool,
+    pub sized_integer_segment_used: bool,
     pub string_bit_string_segment_used: bool,
     pub codepoint_bit_string_segment_used: bool,
+    pub float_bit_string_segment_used: bool,
 }

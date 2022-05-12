@@ -1,9 +1,10 @@
 ---
 source: compiler-core/src/javascript/tests/custom_types.rs
+assertion_line: 226
 expression: "\ntype Cat {\n  Cat(name: String, cuteness: Int)\n}\n\nfn go(cat) {\n  let Cat(x, y) = cat\n  let Cat(name: x, ..) = cat\n  let Cat(cuteness: 4, name: x) = cat\n  x\n}\n\n"
 
 ---
-import { CustomType, throwError } from "../gleam.js";
+import { CustomType, throwError } from "../gleam.mjs";
 
 class Cat extends CustomType {
   constructor(name, cuteness) {
@@ -20,7 +21,7 @@ function go(cat) {
       "my/mod",
       7,
       "go",
-      "Assignment pattern did not much",
+      "Assignment pattern did not match",
       { value: cat }
     );
   }
@@ -32,7 +33,7 @@ function go(cat) {
       "my/mod",
       8,
       "go",
-      "Assignment pattern did not much",
+      "Assignment pattern did not match",
       { value: cat }
     );
   }
@@ -43,7 +44,7 @@ function go(cat) {
       "my/mod",
       9,
       "go",
-      "Assignment pattern did not much",
+      "Assignment pattern did not match",
       { value: cat }
     );
   }

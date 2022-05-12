@@ -1,9 +1,10 @@
 ---
 source: compiler-core/src/javascript/tests/bools.rs
+assertion_line: 103
 expression: "\nfn go(a) {\n  case a {\n    Nil -> 0\n  }\n}\n"
 
 ---
-import { throwError } from "../gleam.js";
+import { throwError } from "../gleam.mjs";
 
 function go(a) {
   if (!a) {

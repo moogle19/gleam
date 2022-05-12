@@ -6,10 +6,9 @@ use debug_ignore::DebugIgnore;
 use flate2::read::GzDecoder;
 use std::{
     fmt::Debug,
-    fs::ReadDir,
     io,
     path::{Path, PathBuf},
-    process::ExitStatus,
+    vec::IntoIter,
 };
 use tar::{Archive, Entry};
 
@@ -57,6 +56,63 @@ pub struct OutputFile {
     pub path: PathBuf,
 }
 
+#[derive(Debug)]
+pub struct ReadDir {
+    entries: Vec<io::Result<DirEntry>>,
+}
+
+impl FromIterator<io::Result<DirEntry>> for ReadDir {
+    fn from_iter<I: IntoIterator<Item = io::Result<DirEntry>>>(iter: I) -> Self {
+        ReadDir {
+            entries: iter.into_iter().collect(),
+        }
+    }
+}
+
+impl ReadDir {
+    pub fn extend(mut self, other: ReadDir) -> Self {
+        self.entries.extend(other.into_iter());
+
+        ReadDir {
+            entries: self.entries,
+        }
+    }
+}
+
+impl IntoIterator for ReadDir {
+    type Item = io::Result<DirEntry>;
+    type IntoIter = IntoIter<Self::Item>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.entries.into_iter()
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct DirEntry {
+    pub pathbuf: PathBuf,
+}
+
+impl DirEntry {
+    pub fn from_path<P: AsRef<Path>>(path: P) -> DirEntry {
+        DirEntry {
+            pathbuf: path.as_ref().to_path_buf(),
+        }
+    }
+
+    pub fn from_pathbuf(pathbuf: PathBuf) -> DirEntry {
+        DirEntry { pathbuf }
+    }
+
+    pub fn as_path(&self) -> &Path {
+        self.pathbuf.as_path()
+    }
+
+    pub fn into_path(self) -> PathBuf {
+        self.pathbuf
+    }
+}
+
 /// A trait used to read files.
 /// Typically we use an implementation that reads from the file system,
 /// but in tests and in other places other implementations may be used.
@@ -80,7 +136,9 @@ pub trait CommandExecutor {
         args: &[String],
         env: &[(&str, String)],
         cwd: Option<&Path>,
-    ) -> Result<ExitStatus, Error>;
+        // Whether to silence stdout
+        quiet: bool,
+    ) -> Result<i32, Error>;
 }
 
 /// A trait used to write files.
@@ -92,6 +150,9 @@ pub trait FileSystemWriter {
     fn delete(&self, path: &Path) -> Result<(), Error>;
     fn copy(&self, from: &Path, to: &Path) -> Result<(), Error>;
     fn copy_dir(&self, from: &Path, to: &Path) -> Result<(), Error>;
+    fn hardlink(&self, from: &Path, to: &Path) -> Result<(), Error>;
+    fn symlink_dir(&self, from: &Path, to: &Path) -> Result<(), Error>;
+    fn delete_file(&self, path: &Path) -> Result<(), Error>;
 }
 
 #[derive(Debug)]
@@ -220,6 +281,19 @@ pub mod test {
         }
     }
 
+    impl CommandExecutor for FilesChannel {
+        fn exec(
+            &self,
+            _program: &str,
+            _args: &[String],
+            _env: &[(&str, String)],
+            _cwd: Option<&Path>,
+            _quiet: bool,
+        ) -> Result<i32, Error> {
+            Ok(0)
+        }
+    }
+
     impl FileSystemWriter for FilesChannel {
         fn writer<'a>(&self, path: &'a Path) -> Result<WrappedWriter, Error> {
             let file = InMemoryFile::new();
@@ -236,11 +310,23 @@ pub mod test {
         }
 
         fn mkdir(&self, _path: &Path) -> Result<(), Error> {
-            panic!("FilesChannel does not support mkdir")
+            Ok(())
         }
 
         fn copy_dir(&self, _from: &Path, _to: &Path) -> Result<(), Error> {
             panic!("FilesChannel does not support copy_dir")
+        }
+
+        fn hardlink(&self, _: &Path, _: &Path) -> Result<(), Error> {
+            panic!("FilesChannel does not support hardlink")
+        }
+
+        fn symlink_dir(&self, _: &Path, _: &Path) -> Result<(), Error> {
+            panic!("FilesChannel does not support symlink")
+        }
+
+        fn delete_file(&self, _path: &Path) -> Result<(), Error> {
+            panic!("FilesChannel does not support deletion")
         }
     }
 

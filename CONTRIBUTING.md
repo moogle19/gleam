@@ -53,6 +53,9 @@ If you have a web browser, you can get a fully pre-configured Gleam development 
 To run the compiler tests. This will require a recent stable version of Rust
 to be installed.
 
+If you are using the Nix package manager, there's a [gleam-nix flake](https://github.com/vic/gleam-nix)
+you can use for running any Gleam version or quickly obtaining a development environment for Gleam.
+
 ```shell
 cargo test
 
@@ -97,4 +100,17 @@ latest stable.
 
 ```shell
 rustup upgrade stable
+```
+
+## Cap'n Proto schema
+
+The compiler uses a Cap'n Proto schema to serialize/deserialize module information.
+Occasionally, the schema needs to change. After modifying `compiler-core/schema.capnp`
+you need to to re-generate `compiler-core/generated/schema_capnp.rs`. To do that,
+[install Cap'n Proto](https://capnproto.org/install.html) and un-comment appropriate lines
+in `compiler-core/build.rs`. Then you should be able to re-generate that file with:
+
+```shell
+cd compiler-core
+cargo build
 ```

@@ -2,89 +2,175 @@ use super::*;
 use crate::{
     ast::SrcSpan,
     build::{
-        package_compiler::{Options, PackageCompiler, Source},
+        package_compiler::{PackageCompiler, Source},
         Origin, Target,
     },
     codegen,
-    config::{Docs, PackageConfig, Repository},
+    config::{Docs, ErlangConfig, PackageConfig, Repository},
     erlang,
     io::test::FilesChannel,
     javascript, type_,
 };
-use std::{path::PathBuf, sync::Arc};
+use std::{collections::HashSet, path::PathBuf, sync::Arc};
 
 use hexpm::version::{Range, Version};
 use pretty_assertions::assert_eq;
 
 macro_rules! assert_erlang_compile {
     ($sources:expr, $expected_output:expr  $(,)?) => {
-        let mut modules = HashMap::new();
-        let options = Options {
-            target: Target::Erlang,
+        let ids = crate::uid::UniqueIdGenerator::new();
+        let mut modules = im::HashMap::new();
+        let config = PackageConfig {
             name: "the_package".to_string(),
-            src_path: PathBuf::from("_build/default/lib/the_package/src"),
-            out_path: PathBuf::from("_build/default/lib/the_package/src"),
-            write_metadata: false,
-            test_path: None,
+            version: Version::new(1, 0, 0),
+            licences: vec![],
+            description: "The description".into(),
+            documentation: Docs { pages: vec![] },
+            dependencies: [].into(),
+            dev_dependencies: [].into(),
+            repository: Repository::None,
+            links: vec![],
+            erlang: ErlangConfig {
+                application_start_module: None,
+                extra_applications: vec![],
+            },
+            target: Target::Erlang,
         };
         let (file_writer, file_receiver) = FilesChannel::new();
-        let mut compiler = PackageCompiler::new(options, file_writer);
+        let root = PathBuf::from("some/build/path/root");
+        let out = PathBuf::from("_build/default/lib/the_package");
+        let lib = PathBuf::from("_build/default/lib");
+        let mut build_journal = HashSet::new();
+        let mut compiler = PackageCompiler::new(
+            &config,
+            &root,
+            &out,
+            &lib,
+            Target::Erlang,
+            ids,
+            file_writer,
+            Some(&mut build_journal),
+        );
+        compiler.write_entrypoint = false;
+        compiler.write_metadata = false;
+        compiler.compile_beam_bytecode = false;
+        compiler.copy_native_files = false;
         compiler.sources = $sources;
         let outputs = compiler
-            .compile(&mut vec![], &mut modules, &mut HashMap::with_capacity(4))
+            .compile(&mut vec![], &mut modules, &mut im::HashMap::new())
             .map(|_| {
                 let mut outputs = FilesChannel::recv_utf8_files(&file_receiver).unwrap();
                 outputs.sort_by(|a, b| a.path.partial_cmp(&b.path).unwrap());
                 outputs
             })
             .map_err(|e| normalise_error(e));
-        assert_eq!($expected_output, outputs);
+        let expected = $expected_output.map(|mut outputs: Vec<OutputFile>| {
+            outputs.sort_by(|a, b| a.path.partial_cmp(&b.path).unwrap());
+            outputs
+        });
+        assert_eq!(expected, outputs);
     };
 }
 
 macro_rules! assert_javascript_compile {
     ($sources:expr, $expected_output:expr  $(,)?) => {
-        let mut modules = HashMap::new();
-        let options = Options {
-            write_metadata: false,
-            target: Target::JavaScript,
+        let ids = crate::uid::UniqueIdGenerator::new();
+        let mut modules = im::HashMap::new();
+        let config = PackageConfig {
             name: "the_package".to_string(),
-            src_path: PathBuf::from("_build/default/lib/the_package/src"),
-            out_path: PathBuf::from("_build/default/lib/the_package/src"),
-            test_path: None,
+            version: Version::new(1, 0, 0),
+            licences: vec![],
+            description: "The description".into(),
+            documentation: Docs { pages: vec![] },
+            dependencies: [].into(),
+            dev_dependencies: [].into(),
+            repository: Repository::None,
+            links: vec![],
+            erlang: ErlangConfig {
+                application_start_module: None,
+                extra_applications: vec![],
+            },
+            target: Target::JavaScript,
         };
         let (file_writer, file_receiver) = FilesChannel::new();
-        let mut compiler = PackageCompiler::new(options, file_writer);
+        let root = PathBuf::from("some/build/path/root");
+        let out = PathBuf::from("_build/default/lib/the_package");
+        let lib = PathBuf::from("_build/default/lib");
+        let mut build_journal = HashSet::new();
+        let mut compiler = PackageCompiler::new(
+            &config,
+            &root,
+            &out,
+            &lib,
+            Target::JavaScript,
+            ids,
+            file_writer,
+            Some(&mut build_journal),
+        );
+        compiler.write_entrypoint = false;
+        compiler.write_metadata = false;
+        compiler.compile_beam_bytecode = false;
+        compiler.copy_native_files = false;
         compiler.sources = $sources;
         let outputs = compiler
-            .compile(&mut vec![], &mut modules, &mut HashMap::with_capacity(4))
+            .compile(&mut vec![], &mut modules, &mut im::HashMap::new())
             .map(|_| {
                 let mut outputs = FilesChannel::recv_utf8_files(&file_receiver).unwrap();
                 outputs.sort_by(|a, b| a.path.partial_cmp(&b.path).unwrap());
                 outputs
             })
             .map_err(|e| normalise_error(e));
-        assert_eq!($expected_output, outputs);
+        let expected = $expected_output.map(|mut outputs: Vec<OutputFile>| {
+            outputs.sort_by(|a, b| a.path.partial_cmp(&b.path).unwrap());
+            outputs
+        });
+        assert_eq!(expected, outputs);
     };
 }
 
 macro_rules! assert_no_warnings {
     ($sources:expr $(,)?) => {
-        let mut modules = HashMap::new();
-        let options = Options {
-            write_metadata: false,
-            target: Target::Erlang,
+        let ids = crate::uid::UniqueIdGenerator::new();
+        let mut modules = im::HashMap::new();
+        let config = PackageConfig {
             name: "the_package".to_string(),
-            src_path: PathBuf::from("_build/default/lib/the_package/src"),
-            out_path: PathBuf::from("_build/default/lib/the_package/src"),
-            test_path: None,
+            version: Version::new(1, 0, 0),
+            licences: vec![],
+            description: "The description".into(),
+            documentation: Docs { pages: vec![] },
+            dependencies: [].into(),
+            dev_dependencies: [].into(),
+            repository: Repository::None,
+            links: vec![],
+            erlang: ErlangConfig {
+                application_start_module: None,
+                extra_applications: vec![],
+            },
+            target: Target::Erlang,
         };
         let mut warnings = vec![];
-        let (file_writer, _file_receiver) = FilesChannel::new();
-        let mut compiler = PackageCompiler::new(options, file_writer);
+        let (file_writer, file_receiver) = FilesChannel::new();
+        let root = PathBuf::from("some/build/path/root");
+        let out = PathBuf::from("_build/default/lib/the_package");
+        let lib = PathBuf::from("_build/default/lib");
+        let mut build_journal = HashSet::new();
+        let mut compiler = PackageCompiler::new(
+            &config,
+            &root,
+            &out,
+            &lib,
+            Target::Erlang,
+            ids,
+            file_writer,
+            Some(&mut build_journal),
+        );
+        compiler.write_entrypoint = false;
+        compiler.write_metadata = false;
+        compiler.compile_beam_bytecode = false;
+        compiler.copy_native_files = false;
         compiler.sources = $sources;
         let outputs = compiler
-            .compile(&mut warnings, &mut modules, &mut HashMap::with_capacity(4))
+            .compile(&mut warnings, &mut modules, &mut im::HashMap::new())
             .unwrap();
         assert_eq!(vec![] as Vec<crate::Warning>, warnings);
     };
@@ -92,7 +178,21 @@ macro_rules! assert_no_warnings {
 
 #[test]
 fn package_compiler_test() {
-    assert_erlang_compile!(vec![], Ok(vec![]));
+    assert_erlang_compile!(
+        vec![],
+        Ok(vec![OutputFile {
+            path: PathBuf::from("_build/default/lib/the_package/ebin/the_package.app"),
+            text: "{application, the_package, [
+    {vsn, \"1.0.0\"},
+    {applications, []},
+    {description, \"The description\"},
+    {modules, []},
+    {registered, []}
+]}.
+"
+            .into(),
+        },])
+    );
 
     assert_erlang_compile!(
         vec![Source {
@@ -101,10 +201,24 @@ fn package_compiler_test() {
             code: "".to_string(),
             origin: Origin::Src,
         }],
-        Ok(vec![OutputFile {
-            text: "-module(one).\n".to_string(),
-            path: PathBuf::from("_build/default/lib/the_package/src/one.erl"),
-        },])
+        Ok(vec![
+            OutputFile {
+                path: PathBuf::from("_build/default/lib/the_package/ebin/the_package.app"),
+                text: "{application, the_package, [
+    {vsn, \"1.0.0\"},
+    {applications, []},
+    {description, \"The description\"},
+    {modules, [one]},
+    {registered, []}
+]}.
+"
+                .into(),
+            },
+            OutputFile {
+                text: "-module(one).\n".to_string(),
+                path: PathBuf::from("_build/default/lib/the_package/build/one.erl"),
+            },
+        ])
     );
 
     assert_erlang_compile!(
@@ -124,12 +238,25 @@ fn package_compiler_test() {
         ],
         Ok(vec![
             OutputFile {
+                path: PathBuf::from("_build/default/lib/the_package/ebin/the_package.app"),
+                text: "{application, the_package, [
+    {vsn, \"1.0.0\"},
+    {applications, []},
+    {description, \"The description\"},
+    {modules, [one,
+               two]},
+    {registered, []}
+]}.
+"
+                .into(),
+            },
+            OutputFile {
                 text: "-module(one).\n".to_string(),
-                path: PathBuf::from("_build/default/lib/the_package/src/one.erl"),
+                path: PathBuf::from("_build/default/lib/the_package/build/one.erl"),
             },
             OutputFile {
                 text: "-module(two).\n".to_string(),
-                path: PathBuf::from("_build/default/lib/the_package/src/two.erl"),
+                path: PathBuf::from("_build/default/lib/the_package/build/two.erl"),
             },
         ])
     );
@@ -141,10 +268,24 @@ fn package_compiler_test() {
             path: PathBuf::from("src/one.gleam"),
             code: "".to_string(),
         }],
-        Ok(vec![OutputFile {
-            path: PathBuf::from("_build/default/lib/the_package/src/one.erl"),
-            text: "-module(one).\n".to_string(),
-        },]),
+        Ok(vec![
+            OutputFile {
+                path: PathBuf::from("_build/default/lib/the_package/ebin/the_package.app"),
+                text: "{application, the_package, [
+    {vsn, \"1.0.0\"},
+    {applications, []},
+    {description, \"The description\"},
+    {modules, [one]},
+    {registered, []}
+]}.
+"
+                .into(),
+            },
+            OutputFile {
+                path: PathBuf::from("_build/default/lib/the_package/build/one.erl"),
+                text: "-module(one).\n".to_string(),
+            },
+        ]),
     );
 
     // TODO: src modules cannot be allowed to import test modules
@@ -190,11 +331,24 @@ fn package_compiler_test() {
         ],
         Ok(vec![
             OutputFile {
-                path: PathBuf::from("_build/default/lib/the_package/src/one.erl"),
+                path: PathBuf::from("_build/default/lib/the_package/ebin/the_package.app"),
+                text: "{application, the_package, [
+    {vsn, \"1.0.0\"},
+    {applications, []},
+    {description, \"The description\"},
+    {modules, [one,
+               two]},
+    {registered, []}
+]}.
+"
+                .into(),
+            },
+            OutputFile {
+                path: PathBuf::from("_build/default/lib/the_package/build/one.erl"),
                 text: "-module(one).\n".to_string(),
             },
             OutputFile {
-                path: PathBuf::from("_build/default/lib/the_package/src/two.erl"),
+                path: PathBuf::from("_build/default/lib/the_package/build/two.erl"),
                 text: "-module(two).\n".to_string(),
             },
         ]),
@@ -217,11 +371,24 @@ fn package_compiler_test() {
         ],
         Ok(vec![
             OutputFile {
-                path: PathBuf::from("_build/default/lib/the_package/src/one.erl"),
+                path: PathBuf::from("_build/default/lib/the_package/ebin/the_package.app"),
+                text: "{application, the_package, [
+    {vsn, \"1.0.0\"},
+    {applications, []},
+    {description, \"The description\"},
+    {modules, [one,
+               two]},
+    {registered, []}
+]}.
+"
+                .into(),
+            },
+            OutputFile {
+                path: PathBuf::from("_build/default/lib/the_package/build/one.erl"),
                 text: "-module(one).\n".to_string(),
             },
             OutputFile {
-                path: PathBuf::from("_build/default/lib/the_package/src/two.erl"),
+                path: PathBuf::from("_build/default/lib/the_package/build/two.erl"),
                 text: "-module(two).\n".to_string(),
             },
         ]),
@@ -244,7 +411,20 @@ fn package_compiler_test() {
         ],
         Ok(vec![
             OutputFile {
-                path: PathBuf::from("_build/default/lib/the_package/src/one.erl"),
+                path: PathBuf::from("_build/default/lib/the_package/ebin/the_package.app"),
+                text: "{application, the_package, [
+    {vsn, \"1.0.0\"},
+    {applications, []},
+    {description, \"The description\"},
+    {modules, [one,
+               two]},
+    {registered, []}
+]}.
+"
+                .into(),
+            },
+            OutputFile {
+                path: PathBuf::from("_build/default/lib/the_package/build/one.erl"),
                 text: "-module(one).
 -compile(no_auto_import).
 
@@ -257,7 +437,7 @@ fn package_compiler_test() {
                 .to_string(),
             },
             OutputFile {
-                path: PathBuf::from("_build/default/lib/the_package/src/two.erl"),
+                path: PathBuf::from("_build/default/lib/the_package/build/two.erl"),
                 text: "-module(two).
 -compile(no_auto_import).
 
@@ -290,7 +470,20 @@ unbox(X) ->
         ],
         Ok(vec![
             OutputFile {
-                path: PathBuf::from("_build/default/lib/the_package/src/one.erl"),
+                path: PathBuf::from("_build/default/lib/the_package/ebin/the_package.app"),
+                text: "{application, the_package, [
+    {vsn, \"1.0.0\"},
+    {applications, []},
+    {description, \"The description\"},
+    {modules, [one,
+               two]},
+    {registered, []}
+]}.
+"
+                .into(),
+            },
+            OutputFile {
+                path: PathBuf::from("_build/default/lib/the_package/build/one.erl"),
                 text: "-module(one).
 -compile(no_auto_import).
 
@@ -303,7 +496,7 @@ unbox(X) ->
                 .to_string(),
             },
             OutputFile {
-                path: PathBuf::from("_build/default/lib/the_package/src/two.erl"),
+                path: PathBuf::from("_build/default/lib/the_package/build/two.erl"),
                 text: "-module(two).
 -compile(no_auto_import).
 
@@ -325,9 +518,22 @@ box(X) ->
             name: "one/two".to_string(),
             code: "pub type Box { Box }".to_string(),
         }],
-        Ok(vec![OutputFile {
-            path: PathBuf::from("_build/default/lib/the_package/src/one@two.erl"),
-            text: "-module(one@two).
+        Ok(vec![
+            OutputFile {
+                path: PathBuf::from("_build/default/lib/the_package/ebin/the_package.app"),
+                text: "{application, the_package, [
+    {vsn, \"1.0.0\"},
+    {applications, []},
+    {description, \"The description\"},
+    {modules, [one@two]},
+    {registered, []}
+]}.
+"
+                .into(),
+            },
+            OutputFile {
+                path: PathBuf::from("_build/default/lib/the_package/build/one@two.erl"),
+                text: "-module(one@two).
 -compile(no_auto_import).
 
 -export_type([box/0]).
@@ -336,8 +542,9 @@ box(X) ->
 
 
 "
-            .to_string(),
-        }]),
+                .to_string(),
+            }
+        ]),
     );
 
     assert_erlang_compile!(
@@ -357,7 +564,20 @@ box(X) ->
         ],
         Ok(vec![
             OutputFile {
-                path: PathBuf::from("_build/default/lib/the_package/src/one.erl"),
+                path: PathBuf::from("_build/default/lib/the_package/ebin/the_package.app"),
+                text: "{application, the_package, [
+    {vsn, \"1.0.0\"},
+    {applications, []},
+    {description, \"The description\"},
+    {modules, [one,
+               two]},
+    {registered, []}
+]}.
+"
+                .into(),
+            },
+            OutputFile {
+                path: PathBuf::from("_build/default/lib/the_package/build/one.erl"),
                 text: "-module(one).
 -compile(no_auto_import).
 
@@ -370,7 +590,7 @@ box(X) ->
                 .to_string(),
             },
             OutputFile {
-                path: PathBuf::from("_build/default/lib/the_package/src/two.erl"),
+                path: PathBuf::from("_build/default/lib/the_package/build/two.erl"),
                 text: "-module(two).
 -compile(no_auto_import).
 
@@ -402,7 +622,20 @@ box() ->
         ],
         Ok(vec![
             OutputFile {
-                path: PathBuf::from("_build/default/lib/the_package/src/one.erl"),
+                path: PathBuf::from("_build/default/lib/the_package/ebin/the_package.app"),
+                text: "{application, the_package, [
+    {vsn, \"1.0.0\"},
+    {applications, []},
+    {description, \"The description\"},
+    {modules, [one,
+               two]},
+    {registered, []}
+]}.
+"
+                .into(),
+            },
+            OutputFile {
+                path: PathBuf::from("_build/default/lib/the_package/build/one.erl"),
                 text: "-module(one).
 -compile(no_auto_import).
 
@@ -415,7 +648,7 @@ go() ->
                 .to_string(),
             },
             OutputFile {
-                path: PathBuf::from("_build/default/lib/the_package/src/two.erl"),
+                path: PathBuf::from("_build/default/lib/the_package/build/two.erl"),
                 text: "-module(two).
 -compile(no_auto_import).
 
@@ -449,7 +682,20 @@ pub fn go(x) { let one.Box(y) = x y }"
         ],
         Ok(vec![
             OutputFile {
-                path: PathBuf::from("_build/default/lib/the_package/src/nested@one.erl"),
+                path: PathBuf::from("_build/default/lib/the_package/ebin/the_package.app"),
+                text: "{application, the_package, [
+    {vsn, \"1.0.0\"},
+    {applications, []},
+    {description, \"The description\"},
+    {modules, [nested@one,
+               two]},
+    {registered, []}
+]}.
+"
+                .into(),
+            },
+            OutputFile {
+                path: PathBuf::from("_build/default/lib/the_package/build/nested@one.erl"),
                 text: "-module(nested@one).
 -compile(no_auto_import).
 
@@ -462,7 +708,7 @@ pub fn go(x) { let one.Box(y) = x y }"
                 .to_string(),
             },
             OutputFile {
-                path: PathBuf::from("_build/default/lib/the_package/src/two.erl"),
+                path: PathBuf::from("_build/default/lib/the_package/build/two.erl"),
                 text: "-module(two).
 -compile(no_auto_import).
 
@@ -497,7 +743,20 @@ pub fn go(x) { let thingy.Box(y) = x y }"
         ],
         Ok(vec![
             OutputFile {
-                path: PathBuf::from("_build/default/lib/the_package/src/nested@one.erl"),
+                path: PathBuf::from("_build/default/lib/the_package/ebin/the_package.app"),
+                text: "{application, the_package, [
+    {vsn, \"1.0.0\"},
+    {applications, []},
+    {description, \"The description\"},
+    {modules, [nested@one,
+               two]},
+    {registered, []}
+]}.
+"
+                .into(),
+            },
+            OutputFile {
+                path: PathBuf::from("_build/default/lib/the_package/build/nested@one.erl"),
                 text: "-module(nested@one).
 -compile(no_auto_import).
 
@@ -510,7 +769,7 @@ pub fn go(x) { let thingy.Box(y) = x y }"
                 .to_string(),
             },
             OutputFile {
-                path: PathBuf::from("_build/default/lib/the_package/src/two.erl"),
+                path: PathBuf::from("_build/default/lib/the_package/build/two.erl"),
                 text: "-module(two).
 -compile(no_auto_import).
 
@@ -548,7 +807,20 @@ go(X) ->
         ],
         Ok(vec![
             OutputFile {
-                path: PathBuf::from("_build/default/lib/the_package/src/nested@one.erl"),
+                path: PathBuf::from("_build/default/lib/the_package/ebin/the_package.app"),
+                text: "{application, the_package, [
+    {vsn, \"1.0.0\"},
+    {applications, []},
+    {description, \"The description\"},
+    {modules, [nested@one,
+               two]},
+    {registered, []}
+]}.
+"
+                .into(),
+            },
+            OutputFile {
+                path: PathBuf::from("_build/default/lib/the_package/build/nested@one.erl"),
                 text: "-module(nested@one).
 -compile(no_auto_import).
 
@@ -564,7 +836,7 @@ go() ->
                 .to_string(),
             },
             OutputFile {
-                path: PathBuf::from("_build/default/lib/the_package/src/two.erl"),
+                path: PathBuf::from("_build/default/lib/the_package/build/two.erl"),
                 text: "-module(two).
 -compile(no_auto_import).
 
@@ -629,7 +901,20 @@ pub fn x(p) { let one.Point(x, _) = p x }"
         ],
         Ok(vec![
             OutputFile {
-                path: PathBuf::from("_build/default/lib/the_package/src/one.erl"),
+                path: PathBuf::from("_build/default/lib/the_package/ebin/the_package.app"),
+                text: "{application, the_package, [
+    {vsn, \"1.0.0\"},
+    {applications, []},
+    {description, \"The description\"},
+    {modules, [one,
+               two]},
+    {registered, []}
+]}.
+"
+                .into(),
+            },
+            OutputFile {
+                path: PathBuf::from("_build/default/lib/the_package/build/one.erl"),
                 text: "-module(one).
 -compile(no_auto_import).
 
@@ -642,13 +927,13 @@ pub fn x(p) { let one.Point(x, _) = p x }"
                 .to_string(),
             },
             OutputFile {
-                path: PathBuf::from("_build/default/lib/the_package/src/one_Point.hrl"),
+                path: PathBuf::from("_build/default/lib/the_package/include/one_Point.hrl"),
                 text: "-record(point, {x :: integer(), y :: integer()}).
 "
                 .to_string(),
             },
             OutputFile {
-                path: PathBuf::from("_build/default/lib/the_package/src/two.erl"),
+                path: PathBuf::from("_build/default/lib/the_package/build/two.erl"),
                 text: "-module(two).
 -compile(no_auto_import).
 
@@ -688,7 +973,20 @@ x(P) ->
         ],
         Ok(vec![
             OutputFile {
-                path: PathBuf::from("_build/default/lib/the_package/src/one.erl"),
+                path: PathBuf::from("_build/default/lib/the_package/ebin/the_package.app"),
+                text: "{application, the_package, [
+    {vsn, \"1.0.0\"},
+    {applications, []},
+    {description, \"The description\"},
+    {modules, [one,
+               two]},
+    {registered, []}
+]}.
+"
+                .into(),
+            },
+            OutputFile {
+                path: PathBuf::from("_build/default/lib/the_package/build/one.erl"),
                 text: "-module(one).
 -compile(no_auto_import).
 
@@ -704,7 +1002,7 @@ x(P) ->
                 .to_string(),
             },
             OutputFile {
-                path: PathBuf::from("_build/default/lib/the_package/src/two.erl"),
+                path: PathBuf::from("_build/default/lib/the_package/build/two.erl"),
                 text: "-module(two).
 -compile(no_auto_import).
 
@@ -740,7 +1038,20 @@ pub fn make() { one.Empty }"
         ],
         Ok(vec![
             OutputFile {
-                path: PathBuf::from("_build/default/lib/the_package/src/one.erl"),
+                path: PathBuf::from("_build/default/lib/the_package/ebin/the_package.app"),
+                text: "{application, the_package, [
+    {vsn, \"1.0.0\"},
+    {applications, []},
+    {description, \"The description\"},
+    {modules, [one,
+               two]},
+    {registered, []}
+]}.
+"
+                .into(),
+            },
+            OutputFile {
+                path: PathBuf::from("_build/default/lib/the_package/build/one.erl"),
                 text: "-module(one).
 -compile(no_auto_import).
 
@@ -753,7 +1064,7 @@ pub fn make() { one.Empty }"
                 .to_string(),
             },
             OutputFile {
-                path: PathBuf::from("_build/default/lib/the_package/src/two.erl"),
+                path: PathBuf::from("_build/default/lib/the_package/build/two.erl"),
                 text: "-module(two).
 -compile(no_auto_import).
 
@@ -785,7 +1096,20 @@ make() ->
         ],
         Ok(vec![
             OutputFile {
-                path: PathBuf::from("_build/default/lib/the_package/src/one.erl"),
+                path: PathBuf::from("_build/default/lib/the_package/ebin/the_package.app"),
+                text: "{application, the_package, [
+    {vsn, \"1.0.0\"},
+    {applications, []},
+    {description, \"The description\"},
+    {modules, [one,
+               two]},
+    {registered, []}
+]}.
+"
+                .into(),
+            },
+            OutputFile {
+                path: PathBuf::from("_build/default/lib/the_package/build/one.erl"),
                 text: "-module(one).
 -compile(no_auto_import).
 
@@ -794,14 +1118,14 @@ make() ->
 
 -type empty() :: empty.
 
--spec id(H) -> H.
+-spec id(I) -> I.
 id(X) ->
     X.
 "
                 .to_string(),
             },
             OutputFile {
-                path: PathBuf::from("_build/default/lib/the_package/src/two.erl"),
+                path: PathBuf::from("_build/default/lib/the_package/build/two.erl"),
                 text: "-module(two).
 -compile(no_auto_import).
 
@@ -834,7 +1158,20 @@ make() ->
         ],
         Ok(vec![
             OutputFile {
-                path: PathBuf::from("_build/default/lib/the_package/src/one.erl"),
+                path: PathBuf::from("_build/default/lib/the_package/ebin/the_package.app"),
+                text: "{application, the_package, [
+    {vsn, \"1.0.0\"},
+    {applications, []},
+    {description, \"The description\"},
+    {modules, [one,
+               two]},
+    {registered, []}
+]}.
+"
+                .into(),
+            },
+            OutputFile {
+                path: PathBuf::from("_build/default/lib/the_package/build/one.erl"),
                 text: "-module(one).
 -compile(no_auto_import).
 
@@ -843,14 +1180,14 @@ make() ->
 
 -type empty() :: empty.
 
--spec id(H) -> H.
+-spec id(I) -> I.
 id(X) ->
     X.
 "
                 .to_string(),
             },
             OutputFile {
-                path: PathBuf::from("_build/default/lib/the_package/src/two.erl"),
+                path: PathBuf::from("_build/default/lib/the_package/build/two.erl"),
                 text: "-module(two).
 -compile(no_auto_import).
 
@@ -882,7 +1219,20 @@ make() ->
         ],
         Ok(vec![
             OutputFile {
-                path: PathBuf::from("_build/default/lib/the_package/src/one.erl"),
+                path: PathBuf::from("_build/default/lib/the_package/ebin/the_package.app"),
+                text: "{application, the_package, [
+    {vsn, \"1.0.0\"},
+    {applications, []},
+    {description, \"The description\"},
+    {modules, [one,
+               two]},
+    {registered, []}
+]}.
+"
+                .into(),
+            },
+            OutputFile {
+                path: PathBuf::from("_build/default/lib/the_package/build/one.erl"),
                 text: "-module(one).
 -compile(no_auto_import).
 
@@ -895,7 +1245,7 @@ make() ->
                 .to_string(),
             },
             OutputFile {
-                path: PathBuf::from("_build/default/lib/the_package/src/two.erl"),
+                path: PathBuf::from("_build/default/lib/the_package/build/two.erl"),
                 text: "-module(two).
 -compile(no_auto_import).
 
@@ -927,7 +1277,20 @@ funky() ->
         ],
         Ok(vec![
             OutputFile {
-                path: PathBuf::from("_build/default/lib/the_package/src/one.erl"),
+                path: PathBuf::from("_build/default/lib/the_package/ebin/the_package.app"),
+                text: "{application, the_package, [
+    {vsn, \"1.0.0\"},
+    {applications, []},
+    {description, \"The description\"},
+    {modules, [one,
+               two]},
+    {registered, []}
+]}.
+"
+                .into(),
+            },
+            OutputFile {
+                path: PathBuf::from("_build/default/lib/the_package/build/one.erl"),
                 text: "-module(one).
 -compile(no_auto_import).
 
@@ -940,7 +1303,7 @@ funky() ->
                 .to_string(),
             },
             OutputFile {
-                path: PathBuf::from("_build/default/lib/the_package/src/two.erl"),
+                path: PathBuf::from("_build/default/lib/the_package/build/two.erl"),
                 text: "-module(two).
 -compile(no_auto_import).
 
@@ -973,20 +1336,33 @@ funky() ->
         ],
         Ok(vec![
             OutputFile {
-                path: PathBuf::from("_build/default/lib/the_package/src/one.erl"),
+                path: PathBuf::from("_build/default/lib/the_package/ebin/the_package.app"),
+                text: "{application, the_package, [
+    {vsn, \"1.0.0\"},
+    {applications, []},
+    {description, \"The description\"},
+    {modules, [one,
+               two]},
+    {registered, []}
+]}.
+"
+                .into(),
+            },
+            OutputFile {
+                path: PathBuf::from("_build/default/lib/the_package/build/one.erl"),
                 text: "-module(one).
 -compile(no_auto_import).
 
 -export(['receive'/1]).
 
--spec \'receive\'(H) -> H.
+-spec \'receive\'(I) -> I.
 'receive'(X) ->
     X.
 "
                 .to_string(),
             },
             OutputFile {
-                path: PathBuf::from("_build/default/lib/the_package/src/two.erl"),
+                path: PathBuf::from("_build/default/lib/the_package/build/two.erl"),
                 text: "-module(two).
 -compile(no_auto_import).
 
@@ -1023,7 +1399,20 @@ funky() ->
         ],
         Ok(vec![
             OutputFile {
-                path: PathBuf::from("_build/default/lib/the_package/src/one.erl"),
+                path: PathBuf::from("_build/default/lib/the_package/ebin/the_package.app"),
+                text: "{application, the_package, [
+    {vsn, \"1.0.0\"},
+    {applications, []},
+    {description, \"The description\"},
+    {modules, [one,
+               two]},
+    {registered, []}
+]}.
+"
+                .into(),
+            },
+            OutputFile {
+                path: PathBuf::from("_build/default/lib/the_package/build/one.erl"),
                 text: "-module(one).
 -compile(no_auto_import).
 
@@ -1036,13 +1425,13 @@ funky() ->
                 .to_string(),
             },
             OutputFile {
-                path: PathBuf::from("_build/default/lib/the_package/src/one_Person.hrl"),
+                path: PathBuf::from("_build/default/lib/the_package/include/one_Person.hrl"),
                 text: "-record(person, {name :: binary(), age :: integer()}).
 "
                 .to_string(),
             },
             OutputFile {
-                path: PathBuf::from("_build/default/lib/the_package/src/two.erl"),
+                path: PathBuf::from("_build/default/lib/the_package/build/two.erl"),
                 text: "-module(two).
 -compile(no_auto_import).
 
@@ -1079,7 +1468,20 @@ get_name(Person) ->
         ],
         Ok(vec![
             OutputFile {
-                path: PathBuf::from("_build/default/lib/the_package/src/one.erl"),
+                path: PathBuf::from("_build/default/lib/the_package/ebin/the_package.app"),
+                text: "{application, the_package, [
+    {vsn, \"1.0.0\"},
+    {applications, []},
+    {description, \"The description\"},
+    {modules, [one,
+               two]},
+    {registered, []}
+]}.
+"
+                .into(),
+            },
+            OutputFile {
+                path: PathBuf::from("_build/default/lib/the_package/build/one.erl"),
                 text: "-module(one).
 -compile(no_auto_import).
 
@@ -1092,13 +1494,13 @@ get_name(Person) ->
                 .to_string(),
             },
             OutputFile {
-                path: PathBuf::from("_build/default/lib/the_package/src/one_Person.hrl"),
+                path: PathBuf::from("_build/default/lib/the_package/include/one_Person.hrl"),
                 text: "-record(person, {name :: binary(), age :: integer()}).
 "
                 .to_string(),
             },
             OutputFile {
-                path: PathBuf::from("_build/default/lib/the_package/src/two.erl"),
+                path: PathBuf::from("_build/default/lib/the_package/build/two.erl"),
                 text: "-module(two).\n".to_string(),
             },
         ]),
@@ -1122,7 +1524,20 @@ get_name(Person) ->
         ],
         Ok(vec![
             OutputFile {
-                path: PathBuf::from("_build/default/lib/the_package/src/one.erl"),
+                path: PathBuf::from("_build/default/lib/the_package/ebin/the_package.app"),
+                text: "{application, the_package, [
+    {vsn, \"1.0.0\"},
+    {applications, []},
+    {description, \"The description\"},
+    {modules, [one,
+               two]},
+    {registered, []}
+]}.
+"
+                .into(),
+            },
+            OutputFile {
+                path: PathBuf::from("_build/default/lib/the_package/build/one.erl"),
                 text: "-module(one).
 -compile(no_auto_import).
 
@@ -1133,13 +1548,13 @@ get_name(Person) ->
                 .to_string(),
             },
             OutputFile {
-                path: PathBuf::from("_build/default/lib/the_package/src/one_Person.hrl"),
+                path: PathBuf::from("_build/default/lib/the_package/include/one_Person.hrl"),
                 text: "-record(person, {name :: binary(), age :: integer()}).
 "
                 .to_string(),
             },
             OutputFile {
-                path: PathBuf::from("_build/default/lib/the_package/src/two.erl"),
+                path: PathBuf::from("_build/default/lib/the_package/build/two.erl"),
                 text: "-module(two).\n".to_string(),
             },
         ]),
@@ -1163,24 +1578,37 @@ get_name(Person) ->
         ],
         Ok(vec![
             OutputFile {
-                path: PathBuf::from("_build/default/lib/the_package/src/one.erl"),
+                path: PathBuf::from("_build/default/lib/the_package/ebin/the_package.app"),
+                text: "{application, the_package, [
+    {vsn, \"1.0.0\"},
+    {applications, []},
+    {description, \"The description\"},
+    {modules, [one,
+               two]},
+    {registered, []}
+]}.
+"
+                .into(),
+            },
+            OutputFile {
+                path: PathBuf::from("_build/default/lib/the_package/build/one.erl"),
                 text: "-module(one).
 -compile(no_auto_import).
 
--export_type([t/1]).\n\n-type t(H) :: {c, integer(), integer()} | {gleam_phantom, H}.
+-export_type([t/1]).\n\n-type t(I) :: {c, integer(), integer()} | {gleam_phantom, I}.
 
 
 "
                 .to_string(),
             },
             OutputFile {
-                path: PathBuf::from("_build/default/lib/the_package/src/one_C.hrl"),
+                path: PathBuf::from("_build/default/lib/the_package/include/one_C.hrl"),
                 text: "-record(c, {a :: integer(), b :: integer()}).
 "
                 .to_string(),
             },
             OutputFile {
-                path: PathBuf::from("_build/default/lib/the_package/src/two.erl"),
+                path: PathBuf::from("_build/default/lib/the_package/build/two.erl"),
                 text: "-module(two).
 -compile(no_auto_import).
 
@@ -1213,7 +1641,20 @@ main() ->
         ],
         Ok(vec![
             OutputFile {
-                path: PathBuf::from("_build/default/lib/the_package/src/one.erl"),
+                path: PathBuf::from("_build/default/lib/the_package/ebin/the_package.app"),
+                text: "{application, the_package, [
+    {vsn, \"1.0.0\"},
+    {applications, []},
+    {description, \"The description\"},
+    {modules, [one,
+               two]},
+    {registered, []}
+]}.
+"
+                .into(),
+            },
+            OutputFile {
+                path: PathBuf::from("_build/default/lib/the_package/build/one.erl"),
                 text: "-module(one).
 -compile(no_auto_import).
 
@@ -1222,20 +1663,20 @@ main() ->
 
 -type t() :: {x, integer()}.
 
--spec id(H) -> H.
+-spec id(I) -> I.
 id(X) ->
     X.
 "
                 .to_string(),
             },
             OutputFile {
-                path: PathBuf::from("_build/default/lib/the_package/src/one_X.hrl"),
+                path: PathBuf::from("_build/default/lib/the_package/include/one_X.hrl"),
                 text: "-record(x, {x :: integer()}).
 "
                 .to_string(),
             },
             OutputFile {
-                path: PathBuf::from("_build/default/lib/the_package/src/two.erl"),
+                path: PathBuf::from("_build/default/lib/the_package/build/two.erl"),
                 text: "-module(two).
 -compile(no_auto_import).
 
@@ -1268,12 +1709,24 @@ make() ->
         ],
         Ok(vec![
             OutputFile {
-                path: PathBuf::from("_build/default/lib/the_package/src/one.erl"),
+                path: PathBuf::from("_build/default/lib/the_package/ebin/the_package.app"),
+                text: "{application, the_package, [
+    {vsn, \"1.0.0\"},
+    {applications, []},
+    {description, \"The description\"},
+    {modules, [one,
+               two]},
+    {registered, []}
+]}.
+".into(),
+            },
+            OutputFile {
+                path: PathBuf::from("_build/default/lib/the_package/build/one.erl"),
                 text: "-module(one).\n"
                 .to_string(),
             },
             OutputFile {
-                path: PathBuf::from("_build/default/lib/the_package/src/two.erl"),
+                path: PathBuf::from("_build/default/lib/the_package/build/two.erl"),
                 text: r#"-module(two).
 -compile(no_auto_import).
 
@@ -1306,26 +1759,39 @@ make_list() ->
         ],
         Ok(vec![
             OutputFile {
-                path: PathBuf::from("_build/default/lib/the_package/src/one.erl"),
+                path: PathBuf::from("_build/default/lib/the_package/ebin/the_package.app"),
+                text: "{application, the_package, [
+    {vsn, \"1.0.0\"},
+    {applications, []},
+    {description, \"The description\"},
+    {modules, [one,
+               two]},
+    {registered, []}
+]}.
+"
+                .into(),
+            },
+            OutputFile {
+                path: PathBuf::from("_build/default/lib/the_package/build/one.erl"),
                 text: "-module(one).
 -compile(no_auto_import).
 
 -export_type([t/1]).
 
--type t(H) :: {c, integer(), integer()} | {gleam_phantom, H}.
+-type t(I) :: {c, integer(), integer()} | {gleam_phantom, I}.
 
 
 "
                 .to_string(),
             },
             OutputFile {
-                path: PathBuf::from("_build/default/lib/the_package/src/one_C.hrl"),
+                path: PathBuf::from("_build/default/lib/the_package/include/one_C.hrl"),
                 text: "-record(c, {a :: integer(), b :: integer()}).
 "
                 .to_string(),
             },
             OutputFile {
-                path: PathBuf::from("_build/default/lib/the_package/src/two.erl"),
+                path: PathBuf::from("_build/default/lib/the_package/build/two.erl"),
                 text: "-module(two).
 -compile(no_auto_import).
 
@@ -1429,7 +1895,10 @@ main() ->
             modules: vec!["one".to_string(), "three".to_string(), "two".to_string()],
         }),
     );
+}
 
+#[test]
+fn bug_752() {
     // Bug: https://github.com/gleam-lang/gleam/issues/752
     assert_erlang_compile!(
         vec![
@@ -1448,33 +1917,46 @@ main() ->
         ],
         Ok(vec![
             OutputFile {
-                path: PathBuf::from("_build/default/lib/the_package/src/one.erl",),
+                path: PathBuf::from("_build/default/lib/the_package/ebin/the_package.app"),
+                text: "{application, the_package, [
+    {vsn, \"1.0.0\"},
+    {applications, []},
+    {description, \"The description\"},
+    {modules, [one,
+               two]},
+    {registered, []}
+]}.
+"
+                .into(),
+            },
+            OutputFile {
+                path: PathBuf::from("_build/default/lib/the_package/build/one.erl",),
                 text: "-module(one).
 -compile(no_auto_import).
 
 -export_type([one/1]).
 
--type one(H) :: {one, H}.
+-type one(I) :: {one, I}.
 
 
 "
                 .to_string(),
             },
             OutputFile {
-                path: PathBuf::from("_build/default/lib/the_package/src/two.erl",),
+                path: PathBuf::from("_build/default/lib/the_package/build/two.erl",),
                 text: "-module(two).
 -compile(no_auto_import).
 
 -export_type([two/1]).
 
--type two(I) :: {two, one:one(integer())} | {gleam_phantom, I}.
+-type two(K) :: {two, one:one(integer())} | {gleam_phantom, K}.
 
 
 "
                 .to_string(),
             },
             OutputFile {
-                path: PathBuf::from("_build/default/lib/the_package/src/two_Two.hrl",),
+                path: PathBuf::from("_build/default/lib/the_package/include/two_Two.hrl",),
                 text: "-record(two, {thing :: one:one(integer())}).
 "
                 .to_string(),
@@ -1508,7 +1990,20 @@ pub fn main(power: Power) { power.to_int(power) }"
         ],
         Ok(vec![
             OutputFile {
-                path: PathBuf::from("_build/default/lib/the_package/src/main.erl",),
+                path: PathBuf::from("_build/default/lib/the_package/ebin/the_package.app"),
+                text: "{application, the_package, [
+    {vsn, \"1.0.0\"},
+    {applications, []},
+    {description, \"The description\"},
+    {modules, [main,
+               power]},
+    {registered, []}
+]}.
+"
+                .into(),
+            },
+            OutputFile {
+                path: PathBuf::from("_build/default/lib/the_package/build/main.erl",),
                 text: "-module(main).
 -compile(no_auto_import).
 
@@ -1521,7 +2016,7 @@ main(Power) ->
                 .to_string(),
             },
             OutputFile {
-                path: PathBuf::from("_build/default/lib/the_package/src/power.erl",),
+                path: PathBuf::from("_build/default/lib/the_package/build/power.erl",),
                 text: "-module(power).
 -compile(no_auto_import).
 
@@ -1537,7 +2032,7 @@ to_int(P) ->
                 .to_string(),
             },
             OutputFile {
-                path: PathBuf::from("_build/default/lib/the_package/src/power_Power.hrl",),
+                path: PathBuf::from("_build/default/lib/the_package/include/power_Power.hrl",),
                 text: "-record(power, {value :: integer()}).
 "
                 .to_string(),
@@ -1568,7 +2063,20 @@ pub fn x() { test }"
         ],
         Ok(vec![
             OutputFile {
-                path: PathBuf::from("_build/default/lib/the_package/src/one.erl"),
+                path: PathBuf::from("_build/default/lib/the_package/ebin/the_package.app"),
+                text: "{application, the_package, [
+    {vsn, \"1.0.0\"},
+    {applications, []},
+    {description, \"The description\"},
+    {modules, [one,
+               two]},
+    {registered, []}
+]}.
+"
+                .into(),
+            },
+            OutputFile {
+                path: PathBuf::from("_build/default/lib/the_package/build/one.erl"),
                 text: "-module(one).
 -compile(no_auto_import).
 
@@ -1581,7 +2089,7 @@ pub fn x() { test }"
                 .to_string(),
             },
             OutputFile {
-                path: PathBuf::from("_build/default/lib/the_package/src/two.erl"),
+                path: PathBuf::from("_build/default/lib/the_package/build/two.erl"),
                 text: "-module(two).
 -compile(no_auto_import).
 
@@ -1616,7 +2124,20 @@ pub fn x() { test }"
         ],
         Ok(vec![
             OutputFile {
-                path: PathBuf::from("_build/default/lib/the_package/src/one.erl"),
+                path: PathBuf::from("_build/default/lib/the_package/ebin/the_package.app"),
+                text: "{application, the_package, [
+    {vsn, \"1.0.0\"},
+    {applications, []},
+    {description, \"The description\"},
+    {modules, [one,
+               two]},
+    {registered, []}
+]}.
+"
+                .into(),
+            },
+            OutputFile {
+                path: PathBuf::from("_build/default/lib/the_package/build/one.erl"),
                 text: "-module(one).
 -compile(no_auto_import).
 
@@ -1631,7 +2152,7 @@ pub fn x() { test }"
                 .to_string(),
             },
             OutputFile {
-                path: PathBuf::from("_build/default/lib/the_package/src/two.erl"),
+                path: PathBuf::from("_build/default/lib/the_package/build/two.erl"),
                 text: "-module(two).
 -compile(no_auto_import).
 
@@ -1701,7 +2222,20 @@ pub fn x() { one.A }"
         ],
         Ok(vec![
             OutputFile {
-                path: PathBuf::from("_build/default/lib/the_package/src/one.erl"),
+                path: PathBuf::from("_build/default/lib/the_package/ebin/the_package.app"),
+                text: "{application, the_package, [
+    {vsn, \"1.0.0\"},
+    {applications, []},
+    {description, \"The description\"},
+    {modules, [one,
+               two]},
+    {registered, []}
+]}.
+"
+                .into(),
+            },
+            OutputFile {
+                path: PathBuf::from("_build/default/lib/the_package/build/one.erl"),
                 text: "-module(one).
 -compile(no_auto_import).
 
@@ -1714,7 +2248,7 @@ pub fn x() { one.A }"
                 .to_string(),
             },
             OutputFile {
-                path: PathBuf::from("_build/default/lib/the_package/src/two.erl"),
+                path: PathBuf::from("_build/default/lib/the_package/build/two.erl"),
                 text: "-module(two).
 -compile(no_auto_import).
 
@@ -1780,25 +2314,32 @@ pub external fn use_type(Port) -> Nil =
 fn config_compilation_test() {
     macro_rules! assert_config_compile {
         ($config:expr, $sources:expr, $expected_output:expr $(,)?) => {
+            let ids = crate::uid::UniqueIdGenerator::new();
             let config = $config;
-            let mut modules = HashMap::new();
+            let mut modules = im::HashMap::new();
             let (file_writer, file_receiver) = FilesChannel::new();
-            let options = package_compiler::Options {
-                write_metadata: false,
-                target: Target::Erlang,
-                name: config.name.clone(),
-                src_path: PathBuf::from("src"),
-                out_path: PathBuf::from("out"),
-                test_path: None,
-            };
-            let mut compiler = PackageCompiler::new(options, file_writer.clone());
+            let root = PathBuf::from("some/build/path/root");
+            let out = PathBuf::from("_build/default/lib/the_package");
+            let lib = PathBuf::from("_build/default/lib");
+            let mut build_journal = HashSet::new();
+            let mut compiler = PackageCompiler::new(
+                &config,
+                &root,
+                &out,
+                &lib,
+                Target::Erlang,
+                ids,
+                file_writer,
+                Some(&mut build_journal),
+            );
+            compiler.write_entrypoint = false;
+            compiler.write_metadata = false;
+            compiler.compile_beam_bytecode = false;
+            compiler.copy_native_files = false;
             compiler.sources = $sources;
             let compiled = compiler
-                .compile(&mut vec![], &mut modules, &mut HashMap::with_capacity(4))
+                .compile(&mut vec![], &mut modules, &mut im::HashMap::new())
                 .expect("Should compile OK");
-            codegen::ErlangApp::new(&PathBuf::from("_build/default/lib/the_package/ebin"))
-                .render(file_writer, &config, &compiled.modules)
-                .unwrap();
             let mut outputs = FilesChannel::recv_utf8_files(&file_receiver).unwrap();
             outputs.sort_by(|a, b| a.path.partial_cmp(&b.path).unwrap());
             assert_eq!($expected_output, outputs);
@@ -1817,6 +2358,7 @@ fn config_compilation_test() {
             licences: Default::default(),
             erlang: Default::default(),
             links: vec![],
+            target: Target::Erlang,
         }
     }
 
@@ -2026,7 +2568,20 @@ const x = two.A"#
         ],
         Ok(vec![
             OutputFile {
-                path: PathBuf::from("_build/default/lib/the_package/src/one@two.erl"),
+                path: PathBuf::from("_build/default/lib/the_package/ebin/the_package.app"),
+                text: "{application, the_package, [
+    {vsn, \"1.0.0\"},
+    {applications, []},
+    {description, \"The description\"},
+    {modules, [one@two,
+               two]},
+    {registered, []}
+]}.
+"
+                .into(),
+            },
+            OutputFile {
+                path: PathBuf::from("_build/default/lib/the_package/build/one@two.erl"),
                 text: "-module(one@two).
 -compile(no_auto_import).
 
@@ -2039,7 +2594,7 @@ const x = two.A"#
                 .to_string(),
             },
             OutputFile {
-                path: PathBuf::from("_build/default/lib/the_package/src/two.erl"),
+                path: PathBuf::from("_build/default/lib/the_package/build/two.erl"),
                 text: "-module(two).\n".to_string(),
             }
         ]),
@@ -2067,23 +2622,76 @@ const x = two.A"#
         ],
         Ok(vec![
             OutputFile {
-                path: PathBuf::from("_build/default/lib/the_package/src/gleam.js"),
+                path: PathBuf::from("_build/default/lib/the_package/dist/gleam.mjs"),
                 text: javascript::PRELUDE.to_string(),
             },
             OutputFile {
-                path: PathBuf::from("_build/default/lib/the_package/src/one/two.js"),
-                text: "import { CustomType } from \"../gleam.js\";
+                path: PathBuf::from("_build/default/lib/the_package/dist/one/two.mjs"),
+                text: "import { CustomType } from \"../gleam.mjs\";
 
 export class A extends CustomType {}\n"
                     .to_string(),
             },
             OutputFile {
-                path: PathBuf::from("_build/default/lib/the_package/src/two.js"),
-                text: r#"import * as $two from "./one/two.js";
+                path: PathBuf::from("_build/default/lib/the_package/dist/two.mjs"),
+                text: r#"import * as $two from "./one/two.mjs";
 
 const x = new $two.A();
 "#
                 .to_string(),
+            }
+        ]),
+    );
+}
+
+// https://github.com/gleam-lang/gleam/issues/1495
+#[test]
+fn import_error() {
+    assert_erlang_compile!(
+        vec![
+            Source {
+                origin: Origin::Src,
+                path: PathBuf::from("/src/one.gleam"),
+                name: "one".to_string(),
+                code: "pub type Error { MyError }".to_string(),
+            },
+            Source {
+                origin: Origin::Src,
+                path: PathBuf::from("/src/two.gleam"),
+                name: "two".to_string(),
+                code: r#"import one.{Error}"#.to_string(),
+            },
+        ],
+        Ok(vec![
+            OutputFile {
+                path: PathBuf::from("_build/default/lib/the_package/ebin/the_package.app"),
+                text: "{application, the_package, [
+    {vsn, \"1.0.0\"},
+    {applications, []},
+    {description, \"The description\"},
+    {modules, [one,
+               two]},
+    {registered, []}
+]}.
+"
+                .into(),
+            },
+            OutputFile {
+                path: PathBuf::from("_build/default/lib/the_package/build/one.erl"),
+                text: "-module(one).
+-compile(no_auto_import).
+
+-export_type([error/0]).
+
+-type error() :: my_error.
+
+
+"
+                .to_string(),
+            },
+            OutputFile {
+                path: PathBuf::from("_build/default/lib/the_package/build/two.erl"),
+                text: "-module(two).\n".to_string(),
             }
         ]),
     );
